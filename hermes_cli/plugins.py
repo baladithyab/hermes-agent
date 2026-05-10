@@ -155,17 +155,37 @@ VALID_HOOKS: Set[str] = {
     # that the gateway sends/edits to show the running list of tool calls).
     # Plugins receive the about-to-be-rendered text plus the per-line list
     # of tool messages and the target platform/source. They may return:
-    #   - a string  -> replaces the rendered content
+    #   - a string  -> replaces the rendered content (gateway still sends/edits)
     #   - a dict {"content": str}  -> same effect
-    #   - None      -> no change
+    #   - a dict {"handled": True, "message_id": str}  -> the plugin took
+    #       over: it has already sent or edited the message itself (using
+    #       the supplied adapter). Gateway records `message_id` as the
+    #       current progress bubble and skips its own send/edit. Use this
+    #       when you need to attach UI elements (Discord Views/buttons,
+    #       Slack blocks, Telegram inline keyboards) that don't fit in
+    #       the plain-string content channel.
+    #   - a dict {"handled": True} (no message_id)  -> the plugin chose
+    #       to suppress this update entirely. Gateway moves on without
+    #       updating its progress_msg_id.
+    #   - None      -> no change; gateway proceeds as normal.
     # First non-None return wins.
     #
     # Kwargs:
-    #   platform:    str (e.g. "discord", "telegram")
-    #   content:     str  -- the joined progress lines, ready to send
-    #   tool_lines:  list[str]  -- the individual progress lines
-    #   source:      SessionSource  -- chat/thread/user context
-    #   first_send:  bool  -- True for the initial send, False on edit
+    #   platform:        str (e.g. "discord", "telegram")
+    #   content:         str  -- the joined progress lines, ready to send
+    #   tool_lines:      list[str]  -- the individual progress lines
+    #   source:          SessionSource  -- chat/thread/user context
+    #   first_send:      bool  -- True for the initial send, False on edit
+    #   adapter:         BasePlatformAdapter  -- the live adapter (for plugins
+    #                    that need raw access; e.g. discord adapter exposes
+    #                    `_client: discord.Client`)
+    #   message_id:      str | None  -- the existing progress bubble's id
+    #                    (None on first_send), so plugins can edit instead
+    #                    of always creating a new message
+    #   reply_to:        str | None  -- the platform-native reply target
+    #                    used by the gateway when first sending
+    #   metadata:        dict | None  -- platform routing metadata
+    #                    (e.g. {"thread_id": "..."} for Discord threads)
     "transform_tool_progress",
     # Approval lifecycle hooks. Fired by tools/approval.py when a dangerous
     # command needs user approval -- fires BOTH for CLI-interactive prompts

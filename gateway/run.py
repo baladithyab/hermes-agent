@@ -13899,10 +13899,21 @@ class GatewayRunner:
 
             # Outbound hook: let plugins rewrite the tool-progress bubble
             # (e.g. spoiler-fold on Discord, tighter summary, custom embed
-            # markers).  Returns the possibly-rewritten content string.
-            def _apply_progress_hook(text: str, lines: list, first: bool) -> str:
+            # markers) — or take over the send entirely (return
+            # {"handled": True, "message_id": "..."} to attach Discord
+            # Views/buttons, Slack blocks, Telegram keyboards, etc.).
+            # Returns a tuple: (text_or_None, handled_msg_id_or_None).
+            #   text:           rewritten content if plugin returned a string/
+            #                   {"content": ...}; gateway will send/edit it
+            #   handled_msg_id: non-None means the plugin already wrote to
+            #                   the platform; gateway must skip its own
+            #                   send/edit and adopt this id as the current
+            #                   progress bubble. Empty string means the
+            #                   plugin chose to suppress without claiming
+            #                   a new message id.
+            def _apply_progress_hook(text: str, lines: list, first: bool):
                 if not text:
-                    return text
+                    return text, None
                 try:
                     from hermes_cli.plugins import invoke_hook as _invoke_hook
                     _results = _invoke_hook(
@@ -13912,18 +13923,25 @@ class GatewayRunner:
                         tool_lines=list(lines),
                         source=source,
                         first_send=first,
+                        adapter=adapter,
+                        message_id=progress_msg_id,
+                        reply_to=_progress_reply_to,
+                        metadata=_progress_metadata,
                     )
                 except Exception as _hook_exc:
                     logger.debug("transform_tool_progress hook failed: %s", _hook_exc)
-                    return text
+                    return text, None
                 for _r in _results:
                     if isinstance(_r, str) and _r:
-                        return _r
+                        return _r, None
                     if isinstance(_r, dict):
+                        if _r.get("handled"):
+                            _mid = _r.get("message_id")
+                            return None, (str(_mid) if _mid else "")
                         _c = _r.get("content")
                         if isinstance(_c, str) and _c:
-                            return _c
-                return text
+                            return _c, None
+                return text, None
             # Skip tool progress for platforms that don't support message
             # editing (e.g. iMessage/BlueBubbles) — each progress update
             # would become a separate message bubble, which is noisy.
@@ -14012,7 +14030,20 @@ class GatewayRunner:
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
-                        full_text = _apply_progress_hook(full_text, progress_lines, False)
+                        full_text, _handled_id = _apply_progress_hook(full_text, progress_lines, False)
+                        if _handled_id is not None:
+                            # Plugin took over the edit (e.g. swapped a Discord
+                            # View). Adopt its message id as the current bubble
+                            # and skip our edit.
+                            if _handled_id:
+                                progress_msg_id = _handled_id
+                                if _cleanup_progress and _handled_id not in _cleanup_msg_ids:
+                                    _cleanup_msg_ids.append(_handled_id)
+                            _last_edit_ts = time.monotonic()
+                            await asyncio.sleep(0.3)
+                            if _run_still_current():
+                                await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                            continue
                         result = await adapter.edit_message(
                             chat_id=source.chat_id,
                             message_id=progress_msg_id,
@@ -14029,7 +14060,17 @@ class GatewayRunner:
                                     adapter.name,
                                 )
                             can_edit = False
-                            _flood_msg = _apply_progress_hook(msg, progress_lines, False)
+                            _flood_msg, _flood_handled = _apply_progress_hook(msg, progress_lines, False)
+                            if _flood_handled is not None:
+                                if _flood_handled:
+                                    progress_msg_id = _flood_handled
+                                    if _cleanup_progress and _flood_handled not in _cleanup_msg_ids:
+                                        _cleanup_msg_ids.append(_flood_handled)
+                                _last_edit_ts = time.monotonic()
+                                await asyncio.sleep(0.3)
+                                if _run_still_current():
+                                    await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                                continue
                             _flood_result = await adapter.send(
                                 chat_id=source.chat_id,
                                 content=_flood_msg,
@@ -14046,7 +14087,17 @@ class GatewayRunner:
                         if can_edit:
                             # First tool: send all accumulated text as new message
                             full_text = "\n".join(progress_lines)
-                            full_text = _apply_progress_hook(full_text, progress_lines, True)
+                            full_text, _first_handled = _apply_progress_hook(full_text, progress_lines, True)
+                            if _first_handled is not None:
+                                if _first_handled:
+                                    progress_msg_id = _first_handled
+                                    if _cleanup_progress and _first_handled not in _cleanup_msg_ids:
+                                        _cleanup_msg_ids.append(_first_handled)
+                                _last_edit_ts = time.monotonic()
+                                await asyncio.sleep(0.3)
+                                if _run_still_current():
+                                    await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                                continue
                             result = await adapter.send(
                                 chat_id=source.chat_id,
                                 content=full_text,
@@ -14055,7 +14106,17 @@ class GatewayRunner:
                             )
                         else:
                             # Editing unsupported: send just this line
-                            _line_msg = _apply_progress_hook(msg, progress_lines, False)
+                            _line_msg, _line_handled = _apply_progress_hook(msg, progress_lines, False)
+                            if _line_handled is not None:
+                                if _line_handled:
+                                    progress_msg_id = _line_handled
+                                    if _cleanup_progress and _line_handled not in _cleanup_msg_ids:
+                                        _cleanup_msg_ids.append(_line_handled)
+                                _last_edit_ts = time.monotonic()
+                                await asyncio.sleep(0.3)
+                                if _run_still_current():
+                                    await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                                continue
                             result = await adapter.send(
                                 chat_id=source.chat_id,
                                 content=_line_msg,
@@ -14091,17 +14152,18 @@ class GatewayRunner:
                                 # one for any tool lines that arrived after.
                                 if can_edit and progress_lines and progress_msg_id:
                                     _pending_text = "\n".join(progress_lines)
-                                    _pending_text = _apply_progress_hook(
+                                    _pending_text, _pending_handled = _apply_progress_hook(
                                         _pending_text, progress_lines, False
                                     )
-                                    try:
-                                        await adapter.edit_message(
-                                            chat_id=source.chat_id,
-                                            message_id=progress_msg_id,
-                                            content=_pending_text,
-                                        )
-                                    except Exception:
-                                        pass
+                                    if _pending_handled is None:
+                                        try:
+                                            await adapter.edit_message(
+                                                chat_id=source.chat_id,
+                                                message_id=progress_msg_id,
+                                                content=_pending_text,
+                                            )
+                                        except Exception:
+                                            pass
                                 progress_msg_id = None
                                 progress_lines = []
                                 last_progress_msg[0] = None
@@ -14113,15 +14175,16 @@ class GatewayRunner:
                     # Final edit with all remaining tools (only if editing works)
                     if can_edit and progress_lines and progress_msg_id:
                         full_text = "\n".join(progress_lines)
-                        full_text = _apply_progress_hook(full_text, progress_lines, False)
-                        try:
-                            await adapter.edit_message(
-                                chat_id=source.chat_id,
-                                message_id=progress_msg_id,
-                                content=full_text,
-                            )
-                        except Exception:
-                            pass
+                        full_text, _final_handled = _apply_progress_hook(full_text, progress_lines, False)
+                        if _final_handled is None:
+                            try:
+                                await adapter.edit_message(
+                                    chat_id=source.chat_id,
+                                    message_id=progress_msg_id,
+                                    content=full_text,
+                                )
+                            except Exception:
+                                pass
                     return
                 except Exception as e:
                     logger.error("Progress message error: %s", e)
