@@ -13911,7 +13911,7 @@ class GatewayRunner:
             #                   progress bubble. Empty string means the
             #                   plugin chose to suppress without claiming
             #                   a new message id.
-            def _apply_progress_hook(text: str, lines: list, first: bool):
+            async def _apply_progress_hook(text: str, lines: list, first: bool):
                 if not text:
                     return text, None
                 try:
@@ -13931,7 +13931,21 @@ class GatewayRunner:
                 except Exception as _hook_exc:
                     logger.debug("transform_tool_progress hook failed: %s", _hook_exc)
                     return text, None
+                # Resolve any coroutine returns (plugins may want to do
+                # async I/O — e.g. send a Discord message with a View).
+                _resolved = []
                 for _r in _results:
+                    if asyncio.iscoroutine(_r):
+                        try:
+                            _r = await _r
+                        except Exception as _rc_exc:
+                            logger.debug(
+                                "transform_tool_progress coroutine failed: %s",
+                                _rc_exc,
+                            )
+                            continue
+                    _resolved.append(_r)
+                for _r in _resolved:
                     if isinstance(_r, str) and _r:
                         return _r, None
                     if isinstance(_r, dict):
@@ -14030,7 +14044,7 @@ class GatewayRunner:
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
-                        full_text, _handled_id = _apply_progress_hook(full_text, progress_lines, False)
+                        full_text, _handled_id = await _apply_progress_hook(full_text, progress_lines, False)
                         if _handled_id is not None:
                             # Plugin took over the edit (e.g. swapped a Discord
                             # View). Adopt its message id as the current bubble
@@ -14060,7 +14074,7 @@ class GatewayRunner:
                                     adapter.name,
                                 )
                             can_edit = False
-                            _flood_msg, _flood_handled = _apply_progress_hook(msg, progress_lines, False)
+                            _flood_msg, _flood_handled = await _apply_progress_hook(msg, progress_lines, False)
                             if _flood_handled is not None:
                                 if _flood_handled:
                                     progress_msg_id = _flood_handled
@@ -14087,7 +14101,7 @@ class GatewayRunner:
                         if can_edit:
                             # First tool: send all accumulated text as new message
                             full_text = "\n".join(progress_lines)
-                            full_text, _first_handled = _apply_progress_hook(full_text, progress_lines, True)
+                            full_text, _first_handled = await _apply_progress_hook(full_text, progress_lines, True)
                             if _first_handled is not None:
                                 if _first_handled:
                                     progress_msg_id = _first_handled
@@ -14106,7 +14120,7 @@ class GatewayRunner:
                             )
                         else:
                             # Editing unsupported: send just this line
-                            _line_msg, _line_handled = _apply_progress_hook(msg, progress_lines, False)
+                            _line_msg, _line_handled = await _apply_progress_hook(msg, progress_lines, False)
                             if _line_handled is not None:
                                 if _line_handled:
                                     progress_msg_id = _line_handled
@@ -14152,7 +14166,7 @@ class GatewayRunner:
                                 # one for any tool lines that arrived after.
                                 if can_edit and progress_lines and progress_msg_id:
                                     _pending_text = "\n".join(progress_lines)
-                                    _pending_text, _pending_handled = _apply_progress_hook(
+                                    _pending_text, _pending_handled = await _apply_progress_hook(
                                         _pending_text, progress_lines, False
                                     )
                                     if _pending_handled is None:
@@ -14175,7 +14189,7 @@ class GatewayRunner:
                     # Final edit with all remaining tools (only if editing works)
                     if can_edit and progress_lines and progress_msg_id:
                         full_text = "\n".join(progress_lines)
-                        full_text, _final_handled = _apply_progress_hook(full_text, progress_lines, False)
+                        full_text, _final_handled = await _apply_progress_hook(full_text, progress_lines, False)
                         if _final_handled is None:
                             try:
                                 await adapter.edit_message(
