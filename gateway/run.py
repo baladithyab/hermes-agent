@@ -13897,6 +13897,33 @@ class GatewayRunner:
             if not adapter:
                 return
 
+            # Outbound hook: let plugins rewrite the tool-progress bubble
+            # (e.g. spoiler-fold on Discord, tighter summary, custom embed
+            # markers).  Returns the possibly-rewritten content string.
+            def _apply_progress_hook(text: str, lines: list, first: bool) -> str:
+                if not text:
+                    return text
+                try:
+                    from hermes_cli.plugins import invoke_hook as _invoke_hook
+                    _results = _invoke_hook(
+                        "transform_tool_progress",
+                        platform=source.platform.value if source.platform else "",
+                        content=text,
+                        tool_lines=list(lines),
+                        source=source,
+                        first_send=first,
+                    )
+                except Exception as _hook_exc:
+                    logger.debug("transform_tool_progress hook failed: %s", _hook_exc)
+                    return text
+                for _r in _results:
+                    if isinstance(_r, str) and _r:
+                        return _r
+                    if isinstance(_r, dict):
+                        _c = _r.get("content")
+                        if isinstance(_c, str) and _c:
+                            return _c
+                return text
             # Skip tool progress for platforms that don't support message
             # editing (e.g. iMessage/BlueBubbles) — each progress update
             # would become a separate message bubble, which is noisy.
@@ -13985,6 +14012,7 @@ class GatewayRunner:
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
+                        full_text = _apply_progress_hook(full_text, progress_lines, False)
                         result = await adapter.edit_message(
                             chat_id=source.chat_id,
                             message_id=progress_msg_id,
@@ -14001,9 +14029,10 @@ class GatewayRunner:
                                     adapter.name,
                                 )
                             can_edit = False
+                            _flood_msg = _apply_progress_hook(msg, progress_lines, False)
                             _flood_result = await adapter.send(
                                 chat_id=source.chat_id,
-                                content=msg,
+                                content=_flood_msg,
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
                             )
@@ -14017,6 +14046,7 @@ class GatewayRunner:
                         if can_edit:
                             # First tool: send all accumulated text as new message
                             full_text = "\n".join(progress_lines)
+                            full_text = _apply_progress_hook(full_text, progress_lines, True)
                             result = await adapter.send(
                                 chat_id=source.chat_id,
                                 content=full_text,
@@ -14025,9 +14055,10 @@ class GatewayRunner:
                             )
                         else:
                             # Editing unsupported: send just this line
+                            _line_msg = _apply_progress_hook(msg, progress_lines, False)
                             result = await adapter.send(
                                 chat_id=source.chat_id,
-                                content=msg,
+                                content=_line_msg,
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
                             )
@@ -14060,6 +14091,9 @@ class GatewayRunner:
                                 # one for any tool lines that arrived after.
                                 if can_edit and progress_lines and progress_msg_id:
                                     _pending_text = "\n".join(progress_lines)
+                                    _pending_text = _apply_progress_hook(
+                                        _pending_text, progress_lines, False
+                                    )
                                     try:
                                         await adapter.edit_message(
                                             chat_id=source.chat_id,
@@ -14079,6 +14113,7 @@ class GatewayRunner:
                     # Final edit with all remaining tools (only if editing works)
                     if can_edit and progress_lines and progress_msg_id:
                         full_text = "\n".join(progress_lines)
+                        full_text = _apply_progress_hook(full_text, progress_lines, False)
                         try:
                             await adapter.edit_message(
                                 chat_id=source.chat_id,

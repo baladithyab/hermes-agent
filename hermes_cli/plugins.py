@@ -151,6 +151,22 @@ VALID_HOOKS: Set[str] = {
     #   {"action": "allow"}  /  None             -> normal dispatch
     # Kwargs: event: MessageEvent, gateway: GatewayRunner, session_store.
     "pre_gateway_dispatch",
+    # Outbound transform for the tool-progress bubble (the single message
+    # that the gateway sends/edits to show the running list of tool calls).
+    # Plugins receive the about-to-be-rendered text plus the per-line list
+    # of tool messages and the target platform/source. They may return:
+    #   - a string  -> replaces the rendered content
+    #   - a dict {"content": str}  -> same effect
+    #   - None      -> no change
+    # First non-None return wins.
+    #
+    # Kwargs:
+    #   platform:    str (e.g. "discord", "telegram")
+    #   content:     str  -- the joined progress lines, ready to send
+    #   tool_lines:  list[str]  -- the individual progress lines
+    #   source:      SessionSource  -- chat/thread/user context
+    #   first_send:  bool  -- True for the initial send, False on edit
+    "transform_tool_progress",
     # Approval lifecycle hooks. Fired by tools/approval.py when a dangerous
     # command needs user approval -- fires BOTH for CLI-interactive prompts
     # and for gateway/ACP approvals (Telegram, Discord, Slack, TUI, etc.).
