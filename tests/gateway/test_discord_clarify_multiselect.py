@@ -1,15 +1,27 @@
-"""Tests for the Discord ClarifyMultiChoiceView (multi-select clarify).
+"""Tests for the Discord ClarifyMultiChoiceView (Select-based multi-select).
 
-Mirrors test_discord_clarify_buttons.py shape but covers the multi-select
-path added to support `clarify(mode='multi')`. The View should:
+Mirrors test_discord_clarify_buttons.py shape but covers the
+multi-select path added to support `clarify(mode='multi')`. The View
+should:
 
-  · render N toggle buttons + Submit + Other (cap N at 23 per Discord limit)
-  · toggle selection state when a numeric button is clicked (no resolve)
-  · finalize on Submit, joining selected canonical choices with the
-    \\x1f separator and resolving the gateway clarify entry
-  · obey the same auth + already-resolved gating as the single-pick view
-  · support the Other escape-hatch (mark_awaiting_text + disable buttons)
-  · disable all buttons after Submit/Other
+  · render ONE ``discord.ui.Select`` with min_values=0, max_values=N
+    plus an ``✏️ Other`` escape-hatch button
+  · resolve when the dropdown closes — interaction.data['values']
+    carries the list of selected option values (stored as str(index))
+  · join the selected choices with U+001F and resolve the gateway
+    clarify entry
+  · obey the same auth + already-resolved gating as the single-pick
+    view
+  · support the Other escape-hatch (mark_awaiting_text + disable
+    components)
+  · disable all components after submit/Other
+
+Note on rendering: discord.py's native multi-select is a dropdown
+(``Select``) where checking multiple options + closing the dropdown
+fires the callback with ``interaction.data['values']``. There is no
+separate Submit button — the close action IS the submit. This matches
+the ``ModelPickerView`` precedent in this same adapter and is the
+canonical Discord pattern.
 """
 
 import sys
@@ -40,7 +52,13 @@ def _clear_clarify_state():
 
 
 def _make_interaction(*, user_id="42", display_name="Tester", roles=None,
-                      include_message=True):
+                      include_message=True, selected_values=None):
+    """Build a mock discord.Interaction with response.* coroutine-callable.
+
+    ``selected_values`` populates ``interaction.data['values']`` for
+    Select-resolution tests — the ClarifyMultiChoiceView reads from
+    there to determine which options the user picked.
+    """
     user = SimpleNamespace(
         id=user_id,
         display_name=display_name,
@@ -58,7 +76,8 @@ def _make_interaction(*, user_id="42", display_name="Tester", roles=None,
         message = SimpleNamespace(embeds=[embed])
     else:
         message = None
-    return SimpleNamespace(user=user, response=response, message=message)
+    data = {"values": list(selected_values)} if selected_values is not None else {}
+    return SimpleNamespace(user=user, response=response, message=message, data=data)
 
 
 # ===========================================================================
@@ -66,44 +85,44 @@ def _make_interaction(*, user_id="42", display_name="Tester", roles=None,
 # ===========================================================================
 
 class TestClarifyMultiChoiceViewConstruction:
-    """View renders one toggle per choice + Submit + Other."""
+    """View renders one Select dropdown + one Other button."""
 
-    def test_renders_n_toggles_plus_submit_plus_other(self):
+    def test_renders_one_select_plus_other(self):
         view = ClarifyMultiChoiceView(
             choices=["apple", "banana", "cherry"],
             clarify_id="m1",
             allowed_user_ids={"42"},
         )
-        # 3 numeric + Submit + Other
-        assert len(view.children) == 5
-        labels = [b.label for b in view.children]
-        assert labels[0].startswith("☐ 1. apple")
-        assert labels[1].startswith("☐ 2. banana")
-        assert labels[2].startswith("☐ 3. cherry")
-        assert "Submit" in labels[3]
-        assert "Other" in labels[4]
-        # custom_ids
-        ids = [b.custom_id for b in view.children]
-        assert ids[0] == "clarify_multi:m1:0"
-        assert ids[1] == "clarify_multi:m1:1"
-        assert ids[2] == "clarify_multi:m1:2"
-        assert ids[3] == "clarify_multi:m1:submit"
-        assert ids[4] == "clarify_multi:m1:other"
-        # Initial selection state — all unselected
-        assert view._selected == [False, False, False]
+        # Select + Other = 2 components total
+        assert len(view.children) == 2
 
-    def test_caps_at_23_choices_plus_submit_plus_other(self):
+        select, other_btn = view.children[0], view.children[1]
+        # Select: stable custom_id, multi-select capable
+        assert select.custom_id == "clarify_multi:m1:select"
+        assert select.min_values == 0
+        assert select.max_values == 3  # all three choices selectable
+        # SelectOption labels are 1-indexed and round-trip-friendly
+        opt_labels = [o.label for o in select.options]
+        opt_values = [o.value for o in select.options]
+        assert opt_labels == ["1. apple", "2. banana", "3. cherry"]
+        assert opt_values == ["0", "1", "2"]
+        # Other button has its own custom_id namespace
+        assert "Other" in other_btn.label
+        assert other_btn.custom_id == "clarify_multi:m1:other"
+
+    def test_caps_at_25_options(self):
         choices = [f"choice-{i}" for i in range(50)]
         view = ClarifyMultiChoiceView(
             choices=choices,
             clarify_id="m_big",
             allowed_user_ids=set(),
         )
-        # Discord limit is 25 components; we cap choices at 23 + Submit + Other = 25
-        assert len(view.children) == 25
-        # Last two are Submit + Other
-        assert "Submit" in view.children[-2].label
-        assert "Other" in view.children[-1].label
+        # Still just 2 components (Select + Other)
+        assert len(view.children) == 2
+        # The Select's options are capped at Discord's 25-option limit
+        select = view.children[0]
+        assert len(select.options) == 25
+        assert select.max_values == 25
 
     def test_truncates_long_choice_label(self):
         long_choice = "x" * 200
@@ -112,99 +131,26 @@ class TestClarifyMultiChoiceViewConstruction:
             clarify_id="m_long",
             allowed_user_ids=set(),
         )
-        first_label = view.children[0].label
-        assert first_label.startswith("☐ 1. ")
+        select = view.children[0]
+        first_label = select.options[0].label
+        assert first_label.startswith("1. ")
         assert first_label.endswith("...")
-        # Final label total <= 80 (Discord cap on button labels)
-        assert len(first_label) <= 80
+        # SelectOption label cap is 100 chars
+        assert len(first_label) <= 100
 
 
 # ===========================================================================
-# Toggle behavior
+# Select callback → resolve_gateway_clarify with joined string
 # ===========================================================================
 
-class TestClarifyMultiChoiceToggle:
-    """Clicking a numeric button toggles selection without resolving."""
+class TestClarifyMultiChoiceResolve:
+    """The Select's callback finalizes with the canonical-choices payload."""
 
     def setup_method(self):
         _clear_clarify_state()
 
     @pytest.mark.asyncio
-    async def test_toggle_flips_state_and_does_not_resolve(self):
-        from tools import clarify_gateway as cm
-        cm.register("m_t1", "sk-T", "Pick many", ["red", "green", "blue"], multi=True)
-
-        view = ClarifyMultiChoiceView(
-            choices=["red", "green", "blue"],
-            clarify_id="m_t1",
-            allowed_user_ids={"42"},
-        )
-
-        interaction = _make_interaction(user_id="42")
-        await view._toggle(interaction, index=1)
-
-        assert view._selected == [False, True, False]
-        # Button label shows selected mark
-        assert view.children[1].label.startswith("☑ 2. green")
-        # Resolve was NOT called
-        with cm._lock:
-            entry = cm._entries.get("m_t1")
-        assert entry is not None
-        assert not entry.event.is_set()
-        assert entry.response is None
-        # View not finalized
-        assert view.resolved is False
-        assert all(not b.disabled for b in view.children)
-
-    @pytest.mark.asyncio
-    async def test_toggle_again_unselects(self):
-        from tools import clarify_gateway as cm
-        cm.register("m_t2", "sk-T", "Pick", ["a", "b"], multi=True)
-
-        view = ClarifyMultiChoiceView(
-            choices=["a", "b"],
-            clarify_id="m_t2",
-            allowed_user_ids={"42"},
-        )
-        interaction = _make_interaction(user_id="42")
-
-        await view._toggle(interaction, index=0)
-        assert view._selected == [True, False]
-        await view._toggle(interaction, index=0)
-        assert view._selected == [False, False]
-        # Label back to unchecked
-        assert view.children[0].label.startswith("☐ 1. a")
-
-    @pytest.mark.asyncio
-    async def test_unauthorized_toggle_rejected(self):
-        from tools import clarify_gateway as cm
-        cm.register("m_t3", "sk-T", "Pick", ["x"], multi=True)
-        view = ClarifyMultiChoiceView(
-            choices=["x"],
-            clarify_id="m_t3",
-            allowed_user_ids={"99999"},  # not 42
-        )
-        interaction = _make_interaction(user_id="42")
-        await view._toggle(interaction, index=0)
-
-        # Selection unchanged, ephemeral message sent
-        assert view._selected == [False]
-        interaction.response.send_message.assert_called_once()
-        assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
-
-
-# ===========================================================================
-# Submit → resolve_gateway_clarify with joined string
-# ===========================================================================
-
-class TestClarifyMultiChoiceSubmit:
-    """Submit finalizes with the canonical-choices payload."""
-
-    def setup_method(self):
-        _clear_clarify_state()
-
-    @pytest.mark.asyncio
-    async def test_submit_joins_selected_with_unit_separator(self):
+    async def test_multi_pick_joins_selected_with_unit_separator(self):
         from tools import clarify_gateway as cm
         cm.register("m_s1", "sk-S", "Pick", ["red", "green", "blue"], multi=True)
 
@@ -213,12 +159,9 @@ class TestClarifyMultiChoiceSubmit:
             clarify_id="m_s1",
             allowed_user_ids={"42"},
         )
-        interaction = _make_interaction(user_id="42")
-
-        # Pick red and blue (skip green)
-        await view._toggle(interaction, index=0)
-        await view._toggle(interaction, index=2)
-        await view._on_submit(interaction)
+        # User picked indices 0 and 2 (red and blue) and closed the dropdown
+        interaction = _make_interaction(user_id="42", selected_values=["0", "2"])
+        await view._on_select_resolve(interaction)
 
         with cm._lock:
             entry = cm._entries.get("m_s1")
@@ -226,20 +169,16 @@ class TestClarifyMultiChoiceSubmit:
         assert entry.event.is_set()
         # Joined with U+001F (ASCII Unit Separator)
         assert entry.response == "red\x1fblue"
-        # All buttons disabled, view resolved
+        # Components disabled, view resolved
         assert view.resolved is True
-        assert all(b.disabled for b in view.children)
-        # Final submit edit_message was called with the embed kwarg —
-        # toggle calls earlier in this test pass view-only, so the call
-        # with embed=... is the submit one.
-        edit_calls = interaction.response.edit_message.call_args_list
-        embed_calls = [c for c in edit_calls if "embed" in c.kwargs]
-        assert len(embed_calls) == 1
+        assert all(c.disabled for c in view.children)
+        # Embed-edit was called
+        interaction.response.edit_message.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_submit_with_no_selection_resolves_empty_string(self):
-        """Empty-selection submit yields response='' so the agent-side tool
-        can split into an empty list — matches the documented contract."""
+    async def test_no_selection_resolves_empty_string(self):
+        """User opened the dropdown and closed it without picking
+        anything — resolves with empty string so agent-side splits to []."""
         from tools import clarify_gateway as cm
         cm.register("m_s2", "sk-S", "Pick", ["x", "y"], multi=True)
 
@@ -248,31 +187,30 @@ class TestClarifyMultiChoiceSubmit:
             clarify_id="m_s2",
             allowed_user_ids=set(),
         )
-        interaction = _make_interaction()
-        await view._on_submit(interaction)
+        interaction = _make_interaction(selected_values=[])
+        await view._on_select_resolve(interaction)
 
         with cm._lock:
             entry = cm._entries.get("m_s2")
         assert entry is not None
         assert entry.event.is_set()
-        # Empty selection → empty string payload
         assert entry.response == ""
 
     @pytest.mark.asyncio
-    async def test_submit_uses_canonical_choices_from_entry(self):
+    async def test_resolve_uses_canonical_choices_from_entry(self):
         """If the View was constructed with stale labels but the gateway
         entry carries the canonical strings, those are what get resolved."""
         from tools import clarify_gateway as cm
-        cm.register("m_s3", "sk-S", "Pick", ["CANONICAL-A", "CANONICAL-B"], multi=True)
+        cm.register("m_s3", "sk-S", "Pick",
+                    ["CANONICAL-A", "CANONICAL-B"], multi=True)
 
         view = ClarifyMultiChoiceView(
             choices=["stale-a", "stale-b"],
             clarify_id="m_s3",
             allowed_user_ids=set(),
         )
-        interaction = _make_interaction()
-        await view._toggle(interaction, index=0)
-        await view._on_submit(interaction)
+        interaction = _make_interaction(selected_values=["0"])
+        await view._on_select_resolve(interaction)
 
         with cm._lock:
             entry = cm._entries.get("m_s3")
@@ -281,19 +219,16 @@ class TestClarifyMultiChoiceSubmit:
         assert entry.response == "CANONICAL-A"
 
     @pytest.mark.asyncio
-    async def test_submit_unauthorized_rejected(self):
+    async def test_resolve_unauthorized_rejected(self):
         from tools import clarify_gateway as cm
         cm.register("m_s4", "sk-S", "Pick", ["x"], multi=True)
         view = ClarifyMultiChoiceView(
             choices=["x"],
             clarify_id="m_s4",
-            allowed_user_ids={"99999"},
+            allowed_user_ids={"99999"},  # not 42
         )
-        # Bypass auth check on toggle by manually flipping state — we want
-        # to verify Submit's auth gate even when state looks "selected".
-        view._selected = [True]
-        interaction = _make_interaction(user_id="42")
-        await view._on_submit(interaction)
+        interaction = _make_interaction(user_id="42", selected_values=["0"])
+        await view._on_select_resolve(interaction)
 
         with cm._lock:
             entry = cm._entries.get("m_s4")
@@ -304,19 +239,41 @@ class TestClarifyMultiChoiceSubmit:
         assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
 
     @pytest.mark.asyncio
-    async def test_already_resolved_submit_sends_ephemeral_reply(self):
+    async def test_already_resolved_sends_ephemeral_reply(self):
         view = ClarifyMultiChoiceView(
             choices=["a", "b"],
             clarify_id="m_s5",
             allowed_user_ids=set(),
         )
         view.resolved = True
-        interaction = _make_interaction()
-        await view._on_submit(interaction)
+        interaction = _make_interaction(selected_values=["0"])
+        await view._on_select_resolve(interaction)
 
         interaction.response.send_message.assert_called_once()
         assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
         interaction.response.edit_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_handles_malformed_values_gracefully(self):
+        """If interaction.data is missing/malformed, treat as zero-selection
+        rather than raising. Defensive against platform-mock variance."""
+        from tools import clarify_gateway as cm
+        cm.register("m_s6", "sk-S", "Pick", ["a", "b"], multi=True)
+        view = ClarifyMultiChoiceView(
+            choices=["a", "b"],
+            clarify_id="m_s6",
+            allowed_user_ids=set(),
+        )
+        # data attr present but values key missing
+        interaction = _make_interaction()
+        interaction.data = {}  # explicitly empty
+        await view._on_select_resolve(interaction)
+
+        with cm._lock:
+            entry = cm._entries.get("m_s6")
+        assert entry is not None
+        assert entry.event.is_set()
+        assert entry.response == ""
 
 
 # ===========================================================================
@@ -347,4 +304,4 @@ class TestClarifyMultiChoiceOther:
         # Not resolved yet — text-intercept does that
         assert not entry.event.is_set()
         assert view.resolved is True
-        assert all(b.disabled for b in view.children)
+        assert all(c.disabled for c in view.children)

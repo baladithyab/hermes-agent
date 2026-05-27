@@ -4203,18 +4203,23 @@ class DiscordAdapter(BasePlatformAdapter):
                 str(c).strip() for c in (choices or []) if c is not None and str(c).strip()
             ]
             # Discord allows up to 5 buttons per row, 5 rows per view = 25.
-            # Single-pick: cap at 24 (reserves Other). Multi: cap at 23
-            # (reserves Submit + Other).
-            cap = 23 if (multi and clean_choices) else 24
-            clean_choices = clean_choices[:cap]
+            # Single-pick: cap at 24 (reserves Other button). Multi-select
+            # uses one Select component (which supports 25 options
+            # internally) plus one Other button — no per-choice button cap
+            # needed beyond the SelectOption limit.
+            if multi and clean_choices:
+                clean_choices = clean_choices[:25]
+            else:
+                clean_choices = clean_choices[:24]
 
             view = None
             if clean_choices and multi:
                 embed.add_field(
                     name="Choices (multi-select)",
                     value=(
-                        "Click buttons to toggle selections, then press ✅ "
-                        "Submit. Click ✏️ Other to type a custom answer instead."
+                        "Open the dropdown below, check off any combination, "
+                        "then close it to submit. Click ✏️ Other to type a "
+                        "custom answer instead."
                     ),
                     inline=False,
                 )
@@ -5766,20 +5771,37 @@ def _define_discord_view_classes() -> None:
     class ClarifyMultiChoiceView(discord.ui.View):
         """Multi-select variant of ClarifyChoiceView.
 
-        Renders one toggle button per choice + a final ``✅ Submit`` button
-        and an ``✏️ Other`` escape-hatch. Clicking a choice button toggles
-        it between selected (``ButtonStyle.success`` / green) and unselected
-        (``ButtonStyle.secondary`` / grey). Submit resolves the gateway
-        clarify with the selected choice strings joined by ASCII Unit
-        Separator (``\\x1f``) — the agent-side ``clarify_tool`` splits on
-        the same separator and exposes the result as ``user_responses``.
+        Renders a native Discord dropdown (``discord.ui.Select`` with
+        ``min_values=0, max_values=N``) so the user can check off any
+        combination of choices and submit by closing the dropdown — the
+        Discord standard for multi-select. A trailing ``✏️ Other`` button
+        provides the same text-capture escape-hatch as the single-pick
+        view.
 
-        Auth gating mirrors :class:`ClarifyChoiceView`. Single-use: after
-        Submit (or Other) all buttons disable and the embed updates with
-        who answered and what they picked.
+        Why a Select instead of toggle buttons:
+          - It's the canonical Discord multi-select component (rapptz/
+            discord.py docs: ``min_values``/``max_values`` parameters
+            on ``ui.Select``).
+          - The ``ModelPickerView`` in this same adapter uses the Select
+            pattern — keeping consistency.
+          - No separate Submit button: the Select's callback fires with
+            the full ``interaction.data['values']`` list when the user
+            closes the dropdown.
+          - Half the code, fewer custom_id slots used (Submit + Other +
+            N toggle buttons would have eaten the View's 25-component
+            cap; one Select + one Other button leaves 23 slots free).
 
-        Discord limits a View to 25 components — we cap choices at 23 to
-        leave room for Submit + Other.
+        The resolved response is the selected choice strings joined by
+        ASCII Unit Separator (``\\x1f``) — agent-side ``clarify_tool``
+        splits on the same separator for ``user_responses: list[str]``.
+
+        Auth gating mirrors ClarifyChoiceView. Single-use: after the
+        Select resolves (or Other), all components disable and the embed
+        updates with who answered and what they picked.
+
+        Discord ``Select`` accepts up to 25 options; the View cap is
+        25 components (one Select + one Other = 2). We cap choices at
+        25 for the Select itself.
         """
 
         # Sentinel must match tools.clarify_tool._MULTI_SEP exactly.
@@ -5793,35 +5815,35 @@ def _define_discord_view_classes() -> None:
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=300)  # 5-minute timeout
-            self.choices = list(choices)[:23]
+            self.choices = list(choices)[:25]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
-            # Track selection state per button index — kept on the view so
-            # we don't have to introspect button styles on Submit.
-            self._selected: List[bool] = [False] * len(self.choices)
-            self._buttons: List["discord.ui.Button"] = []
 
+            options: List["discord.SelectOption"] = []
             for index, choice in enumerate(self.choices):
-                # Discord button labels are capped at 80 chars.
-                label_body = choice if len(choice) <= 73 else choice[:70] + "..."
-                button = discord.ui.Button(
-                    label=f"☐ {index + 1}. {label_body}",
-                    style=discord.ButtonStyle.secondary,
-                    custom_id=f"clarify_multi:{clarify_id}:{index}",
+                # SelectOption label cap is 100 chars, value cap 100.
+                label = choice if len(choice) <= 95 else choice[:92] + "..."
+                # Index is the stable key for the value — we look up the
+                # canonical choice text from the gateway entry on resolve,
+                # so the value just needs to be unique and round-trippable.
+                options.append(
+                    discord.SelectOption(
+                        label=f"{index + 1}. {label}",
+                        value=str(index),
+                    )
                 )
-                button.callback = self._make_toggle_callback(index)
-                self.add_item(button)
-                self._buttons.append(button)
 
-            submit_btn = discord.ui.Button(
-                label="✅ Submit",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"clarify_multi:{clarify_id}:submit",
+            select = discord.ui.Select(
+                placeholder="Pick zero or more, then close the dropdown to submit",
+                options=options,
+                min_values=0,
+                max_values=len(options) if options else 1,
+                custom_id=f"clarify_multi:{clarify_id}:select",
             )
-            submit_btn.callback = self._on_submit
-            self.add_item(submit_btn)
+            select.callback = self._on_select_resolve
+            self.add_item(select)
 
             other_btn = discord.ui.Button(
                 label="✏️ Other (type answer)",
@@ -5836,13 +5858,10 @@ def _define_discord_view_classes() -> None:
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
             )
 
-        def _make_toggle_callback(self, index: int):
-            async def _callback(interaction: "discord.Interaction"):
-                await self._toggle(interaction, index)
-            return _callback
-
-        async def _toggle(self, interaction: "discord.Interaction", index: int) -> None:
-            """Flip the selection state for one choice without finalizing."""
+        async def _on_select_resolve(self, interaction: "discord.Interaction") -> None:
+            """Finalize: read interaction.data['values'] (the selected indices)
+            and resolve the gateway clarify with the joined canonical strings.
+            """
             if self.resolved:
                 await interaction.response.send_message(
                     "This prompt has already been answered~", ephemeral=True,
@@ -5853,50 +5872,23 @@ def _define_discord_view_classes() -> None:
                     "You're not authorized to answer this prompt~", ephemeral=True,
                 )
                 return
-            if not (0 <= index < len(self._selected)):
-                # Stale / spoofed click — defer silently.
-                try:
-                    await interaction.response.defer()
-                except Exception:
-                    pass
-                return
 
-            self._selected[index] = not self._selected[index]
-            btn = self._buttons[index]
-            choice = self.choices[index]
-            label_body = choice if len(choice) <= 73 else choice[:70] + "..."
-            if self._selected[index]:
-                btn.style = discord.ButtonStyle.success
-                btn.label = f"☑ {index + 1}. {label_body}"
-            else:
-                btn.style = discord.ButtonStyle.secondary
-                btn.label = f"☐ {index + 1}. {label_body}"
-
+            # Pull selected indices from the interaction payload. We stored
+            # str(index) as each option's value, so each selected value is
+            # a numeric string. discord.py also exposes select.values on
+            # the component, but reading interaction.data is robust to
+            # platform-mock differences.
+            raw_values = []
             try:
-                await interaction.response.edit_message(view=self)
+                raw_values = list(interaction.data.get("values", [])) if isinstance(interaction.data, dict) else []
             except Exception:
-                logger.debug(
-                    "Discord clarify-multi toggle edit_message failed for %s",
-                    self.clarify_id,
-                    exc_info=True,
-                )
+                raw_values = []
+            indices: List[int] = []
+            for v in raw_values:
                 try:
-                    await interaction.response.defer()
-                except Exception:
-                    pass
-
-        async def _on_submit(self, interaction: "discord.Interaction") -> None:
-            """Finalize: resolve the clarify with all currently-selected choices."""
-            if self.resolved:
-                await interaction.response.send_message(
-                    "This prompt has already been answered~", ephemeral=True,
-                )
-                return
-            if not self._check_auth(interaction):
-                await interaction.response.send_message(
-                    "You're not authorized to answer this prompt~", ephemeral=True,
-                )
-                return
+                    indices.append(int(v))
+                except (TypeError, ValueError):
+                    continue
 
             # Round-trip the canonical entry.choices values rather than the
             # button-label variants — same defensive pattern as the single-
@@ -5911,9 +5903,7 @@ def _define_discord_view_classes() -> None:
                 pass
 
             picked: List[str] = []
-            for i, sel in enumerate(self._selected):
-                if not sel:
-                    continue
+            for i in indices:
                 if 0 <= i < len(canonical_choices):
                     picked.append(canonical_choices[i])
 
@@ -5938,7 +5928,7 @@ def _define_discord_view_classes() -> None:
                 await interaction.response.edit_message(embed=embed, view=self)
             except Exception:
                 logger.debug(
-                    "Discord clarify-multi submit edit_message failed for %s",
+                    "Discord clarify-multi select edit_message failed for %s",
                     self.clarify_id,
                     exc_info=True,
                 )
