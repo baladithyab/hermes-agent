@@ -17667,12 +17667,14 @@ class GatewayRunner:
             # explaining that no response arrived (so the agent can adapt
             # rather than hang forever).
             # ------------------------------------------------------------------
-            def _clarify_callback_sync(question: str, choices) -> str:
+            def _clarify_callback_sync(question: str, choices, *, mode: str = "single") -> str:
                 from tools import clarify_gateway as _clarify_mod
                 import uuid as _uuid
 
                 if not _status_adapter:
                     return ""
+
+                multi = (str(mode).strip().lower() == "multi") and bool(choices)
 
                 clarify_id = _uuid.uuid4().hex[:10]
                 _clarify_mod.register(
@@ -17680,6 +17682,7 @@ class GatewayRunner:
                     session_key=session_key or "",
                     question=question,
                     choices=list(choices) if choices else None,
+                    multi=multi,
                 )
 
                 # Pause typing — like approval, we don't want a "thinking..."
@@ -17692,15 +17695,31 @@ class GatewayRunner:
                     pass
 
                 send_ok = False
-                fut = safe_schedule_threadsafe(
-                    _status_adapter.send_clarify(
+                # Forward-compat: prefer adapter.send_clarify(..., multi=...)
+                # for adapters that have been updated; fall back to the
+                # legacy signature so untouched adapters keep working with
+                # single-pick semantics.
+                try:
+                    coro = _status_adapter.send_clarify(
                         chat_id=_status_chat_id,
                         question=question,
                         choices=list(choices) if choices else None,
                         clarify_id=clarify_id,
                         session_key=session_key or "",
                         metadata=_status_thread_metadata,
-                    ),
+                        multi=multi,
+                    )
+                except TypeError:
+                    coro = _status_adapter.send_clarify(
+                        chat_id=_status_chat_id,
+                        question=question,
+                        choices=list(choices) if choices else None,
+                        clarify_id=clarify_id,
+                        session_key=session_key or "",
+                        metadata=_status_thread_metadata,
+                    )
+                fut = safe_schedule_threadsafe(
+                    coro,
                     _loop_for_step,
                     logger=logger,
                     log_message="Clarify send failed to schedule",

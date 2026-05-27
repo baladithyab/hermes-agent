@@ -19,10 +19,17 @@ from typing import List, Optional, Callable
 # A 5th "Other (type your answer)" option is always appended by the UI.
 MAX_CHOICES = 4
 
+# Sentinel used by multi-select Discord views to join the user's selected
+# choices into a single string for transit through the gateway clarify
+# primitive (which deals in opaque str responses). Picked to be the same
+# byte the Discord adapter emits — keep them in sync.
+_MULTI_SEP = "\x1f"
+
 
 def clarify_tool(
     question: str,
     choices: Optional[List[str]] = None,
+    mode: str = "single",
     callback: Optional[Callable] = None,
 ) -> str:
     """
@@ -32,17 +39,34 @@ def clarify_tool(
         question: The question text to present.
         choices:  Up to 4 predefined answer choices. When omitted the
                   question is purely open-ended.
+        mode:     ``"single"`` (default) or ``"multi"``. Multi-select
+                  prompts the user to pick zero or more choices and is
+                  currently supported on Discord only — other platforms
+                  fall back to single-pick. Ignored when ``choices`` is
+                  omitted (open-ended).
         callback: Platform-provided function that handles the actual UI
-                  interaction. Signature: callback(question, choices) -> str.
-                  Injected by the agent runner (cli.py / gateway).
+                  interaction. Signature:
+                  ``callback(question, choices, *, mode='single') -> str``.
+                  Older callbacks without the ``mode`` kwarg still work —
+                  this dispatcher detects and falls back. Injected by the
+                  agent runner (cli.py / gateway).
 
     Returns:
-        JSON string with the user's response.
+        JSON string with the user's response. Single-pick:
+        ``{"user_response": "<choice>"}``. Multi-select adds
+        ``"user_responses": [<choice>, ...]`` and sets ``user_response``
+        to the joined-with-comma form for legacy callers.
     """
     if not question or not question.strip():
         return tool_error("Question text is required.")
 
     question = question.strip()
+
+    # Validate mode — quietly normalize unknown modes to "single" rather
+    # than failing the tool call (matches existing tolerant behavior).
+    mode = (mode or "single").strip().lower()
+    if mode not in ("single", "multi"):
+        mode = "single"
 
     # Validate and trim choices
     if choices is not None:
@@ -54,6 +78,10 @@ def clarify_tool(
         if not choices:
             choices = None  # empty list → open-ended
 
+    # Multi mode requires choices — open-ended multi makes no sense.
+    if mode == "multi" and not choices:
+        mode = "single"
+
     if callback is None:
         return json.dumps(
             {"error": "Clarify tool is not available in this execution context."},
@@ -61,18 +89,36 @@ def clarify_tool(
         )
 
     try:
-        user_response = callback(question, choices)
+        # Forward-compat: try modern signature with ``mode`` kwarg, fall
+        # back to legacy positional signature for callbacks that haven't
+        # been updated yet (CLI, older custom embeddings).
+        try:
+            user_response = callback(question, choices, mode=mode)
+        except TypeError:
+            user_response = callback(question, choices)
     except Exception as exc:
         return json.dumps(
             {"error": f"Failed to get user input: {exc}"},
             ensure_ascii=False,
         )
 
-    return json.dumps({
+    raw = str(user_response if user_response is not None else "").strip()
+    payload = {
         "question": question,
         "choices_offered": choices,
-        "user_response": str(user_response).strip(),
-    }, ensure_ascii=False)
+        "user_response": raw,
+    }
+    if mode == "multi":
+        # Split on the multi-select separator. Empty selections are
+        # represented as an empty list (user clicked Submit without
+        # picking anything).
+        parts = [p.strip() for p in raw.split(_MULTI_SEP) if p.strip()] if raw else []
+        payload["user_responses"] = parts
+        # Keep ``user_response`` populated for callers that haven't been
+        # updated to read ``user_responses`` — comma-joined for human
+        # readability.
+        payload["user_response"] = ", ".join(parts)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def check_clarify_requirements() -> bool:
@@ -93,6 +139,11 @@ CLARIFY_SCHEMA = {
         "or types their own answer via a 5th 'Other' option.\n"
         "2. **Open-ended** — omit choices entirely. The user types a free-form "
         "response.\n\n"
+        "By default the user picks ONE choice. Set `mode: \"multi\"` for "
+        "multi-select where the user can pick zero or more (Discord only; "
+        "other platforms fall back to single-pick). Returns "
+        "`user_responses: [<choice>, ...]` alongside the legacy "
+        "`user_response` (joined with commas) when in multi mode.\n\n"
         "Use this tool when:\n"
         "- The task is ambiguous and you need the user to choose an approach\n"
         "- You want post-task feedback ('How did that work out?')\n"
@@ -119,6 +170,17 @@ CLARIFY_SCHEMA = {
                     "automatically appends an 'Other (type your answer)' option."
                 ),
             },
+            "mode": {
+                "type": "string",
+                "enum": ["single", "multi"],
+                "description": (
+                    "Selection mode. 'single' (default) — user picks exactly "
+                    "one choice. 'multi' — user picks zero or more, then "
+                    "presses Submit. Multi mode is currently rendered "
+                    "natively only on Discord; other platforms fall back to "
+                    "single-pick UI. Ignored when `choices` is omitted."
+                ),
+            },
         },
         "required": ["question"],
     },
@@ -135,6 +197,7 @@ registry.register(
     handler=lambda args, **kw: clarify_tool(
         question=args.get("question", ""),
         choices=args.get("choices"),
+        mode=args.get("mode", "single"),
         callback=kw.get("callback")),
     check_fn=check_clarify_requirements,
     emoji="❓",

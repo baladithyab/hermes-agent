@@ -2406,6 +2406,8 @@ class BasePlatformAdapter(ABC):
         clarify_id: str,
         session_key: str,
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        multi: bool = False,
     ) -> SendResult:
         """Send a clarify prompt to the user.
 
@@ -2426,6 +2428,12 @@ class BasePlatformAdapter(ABC):
             resolves the clarify automatically (see
             ``GatewayRunner._maybe_intercept_clarify_text``).
 
+        ``multi=True`` requests a multi-select view (currently rendered
+        natively only on Discord). Adapters that don't support multi-select
+        should silently fall back to single-pick UI; the gateway-side
+        clarify_tool already comma-joins legacy single responses for
+        callers reading the new ``user_responses`` field.
+
         The default implementation falls back to a numbered text list,
         which works on every platform — the user replies with a number
         ("2") or with the literal choice text, and the gateway intercepts
@@ -2441,7 +2449,13 @@ class BasePlatformAdapter(ABC):
             for i, choice in enumerate(choices, start=1):
                 lines.append(f"  {i}. {choice}")
             lines.append("")
-            lines.append("Reply with the number, the option text, or your own answer.")
+            if multi:
+                lines.append(
+                    "Reply with comma-separated numbers (e.g. '1, 3') to pick "
+                    "multiple, or type your own answer."
+                )
+            else:
+                lines.append("Reply with the number, the option text, or your own answer.")
             text = "\n".join(lines)
             # Text fallback: enable text-capture so the gateway intercept
             # picks up the user's typed reply (e.g. "2" or choice text).
