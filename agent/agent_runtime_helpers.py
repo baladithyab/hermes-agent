@@ -1681,6 +1681,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         return _clarify_tool(
             question=function_args.get("question", ""),
             choices=function_args.get("choices"),
+            mode=function_args.get("mode", "single"),
             callback=agent.clarify_callback,
         )
     elif function_name == "delegate_task":
