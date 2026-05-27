@@ -659,6 +659,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             function_result = _clarify_tool(
                 question=function_args.get("question", ""),
                 choices=function_args.get("choices"),
+                mode=function_args.get("mode", "single"),
                 callback=agent.clarify_callback,
             )
             tool_duration = time.time() - tool_start_time
