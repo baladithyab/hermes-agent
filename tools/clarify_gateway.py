@@ -54,6 +54,13 @@ class _ClarifyEntry:
     event: threading.Event = field(default_factory=threading.Event)
     response: Optional[str] = None
     awaiting_text: bool = False  # set when user picked "Other" or clarify is open-ended
+    # Multi-select mode (Discord only as of v0.12.x). When True the
+    # adapter renders a multi-select View where each numeric button
+    # toggles selected/unselected and a final Submit button finalizes.
+    # The resolved response is the selected choice strings joined by
+    # ASCII Unit Separator (\x1f) — the agent-side clarify_tool splits
+    # back into a list. Single-pick mode (the default) is unchanged.
+    multi: bool = False
 
     def signature(self) -> Dict[str, object]:
         return {
@@ -61,6 +68,7 @@ class _ClarifyEntry:
             "session_key": self.session_key,
             "question": self.question,
             "choices": list(self.choices) if self.choices else None,
+            "multi": self.multi,
         }
 
 
@@ -80,11 +88,16 @@ def register(
     session_key: str,
     question: str,
     choices: Optional[List[str]],
+    multi: bool = False,
 ) -> _ClarifyEntry:
     """Register a pending clarify request and return the entry.
 
     The caller (gateway clarify_callback) will then send the prompt to the
     user and block on ``wait_for_response(clarify_id, timeout)``.
+
+    ``multi=True`` puts the entry into multi-select mode (Discord only as
+    of v0.12.x). Open-ended questions (``choices is None``) ignore the
+    flag — there is no UI difference.
     """
     entry = _ClarifyEntry(
         clarify_id=clarify_id,
@@ -93,6 +106,7 @@ def register(
         choices=list(choices) if choices else None,
         # Open-ended (no choices) → next message IS the response, no buttons needed.
         awaiting_text=not bool(choices),
+        multi=bool(multi) and bool(choices),
     )
     with _lock:
         _entries[clarify_id] = entry

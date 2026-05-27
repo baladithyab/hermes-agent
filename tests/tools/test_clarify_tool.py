@@ -193,3 +193,102 @@ class TestClarifySchema:
     def test_max_choices_is_four(self):
         """MAX_CHOICES constant should be 4."""
         assert MAX_CHOICES == 4
+
+    def test_schema_advertises_mode_parameter(self):
+        """Schema should expose `mode` with the single|multi enum."""
+        mode_spec = CLARIFY_SCHEMA["parameters"]["properties"].get("mode")
+        assert mode_spec is not None, "schema must advertise the new mode parameter"
+        assert mode_spec.get("enum") == ["single", "multi"]
+        # Mode is optional — single is the default
+        assert "mode" not in CLARIFY_SCHEMA["parameters"]["required"]
+
+
+class TestClarifyToolMultiMode:
+    """Multi-select mode (mode='multi') splits the joined response."""
+
+    def test_multi_mode_splits_unit_separator(self):
+        """When the callback returns choices joined by U+001F, the tool
+        should expose them as `user_responses: list[str]` and also
+        populate the legacy `user_response` field with a comma-joined
+        form so callers that haven't been updated still get something
+        readable."""
+        def mock_callback(question, choices, *, mode="single"):
+            assert mode == "multi"
+            return "red\x1fblue"
+
+        result = json.loads(clarify_tool(
+            "Pick all that apply",
+            choices=["red", "green", "blue"],
+            mode="multi",
+            callback=mock_callback,
+        ))
+        assert result["user_responses"] == ["red", "blue"]
+        assert result["user_response"] == "red, blue"
+
+    def test_multi_mode_empty_response_yields_empty_list(self):
+        """User clicked Submit with no selections."""
+        def mock_callback(question, choices, *, mode="single"):
+            assert mode == "multi"
+            return ""
+
+        result = json.loads(clarify_tool(
+            "Pick all that apply",
+            choices=["a", "b"],
+            mode="multi",
+            callback=mock_callback,
+        ))
+        assert result["user_responses"] == []
+        assert result["user_response"] == ""
+
+    def test_multi_mode_falls_back_to_legacy_callback_signature(self):
+        """Older callbacks without `mode` kwarg still work — the tool
+        catches TypeError and retries the call positionally."""
+        captured = {}
+
+        def legacy_callback(question, choices):
+            captured["question"] = question
+            captured["choices"] = choices
+            return "x\x1fy"
+
+        result = json.loads(clarify_tool(
+            "legacy mixer",
+            choices=["x", "y", "z"],
+            mode="multi",
+            callback=legacy_callback,
+        ))
+        assert captured["choices"] == ["x", "y", "z"]
+        assert result["user_responses"] == ["x", "y"]
+
+    def test_multi_mode_without_choices_falls_back_to_single(self):
+        """Open-ended multi makes no sense — the tool quietly downgrades
+        to single mode so the response shape stays single."""
+        def mock_callback(question, choices, *, mode="single"):
+            assert mode == "single"  # downgraded
+            assert choices is None
+            return "free-form text"
+
+        result = json.loads(clarify_tool(
+            "open ended",
+            choices=None,
+            mode="multi",
+            callback=mock_callback,
+        ))
+        # user_responses key is multi-only — should not appear in single
+        assert "user_responses" not in result
+        assert result["user_response"] == "free-form text"
+
+    def test_unknown_mode_normalized_to_single(self):
+        """Tolerant: unknown modes do NOT fail the call, they normalize
+        to single (matches the rest of the tool's tolerant validation)."""
+        def mock_callback(question, choices, *, mode="single"):
+            assert mode == "single"
+            return "picked"
+
+        result = json.loads(clarify_tool(
+            "q",
+            choices=["picked"],
+            mode="not_a_mode",
+            callback=mock_callback,
+        ))
+        assert "user_responses" not in result
+        assert result["user_response"] == "picked"
