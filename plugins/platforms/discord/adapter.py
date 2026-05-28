@@ -4249,6 +4249,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
 
             msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
+            # Stash the message on the view so on_timeout can edit the embed
+            # in place (discord.py doesn't auto-track the message for views
+            # sent via channel.send — only via interaction.followup.send).
+            # Without this, on_timeout has no handle to update the UI.
+            if view is not None:
+                try:
+                    view.message = msg
+                except Exception:
+                    pass
             return SendResult(success=True, message_id=str(msg.id))
         except Exception as e:
             logger.warning("[%s] send_clarify failed: %s", self.name, e)
@@ -5062,6 +5071,28 @@ def _component_check_auth(
     return False
 
 
+def _clarify_view_timeout() -> float:
+    """Return the Discord clarify View timeout, aligned with the agent-side wait.
+
+    The two timeouts must be coordinated: if the View timeout fires before
+    the agent-side ``wait_for_response`` does, ``on_timeout`` runs and must
+    proactively resolve the gateway clarify (with an empty sentinel) so the
+    agent thread unblocks. We pull the same config the agent uses
+    (``agent.clarify_timeout``, default 600s) and add a small safety margin
+    (10s) so under normal circumstances the agent-side timeout always fires
+    first — making on_timeout the rare/unhealthy path, not the typical one.
+
+    Falls back to 600 + margin if the import fails (e.g. test isolation).
+    """
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+        agent_timeout = float(get_clarify_timeout())
+    except Exception:
+        agent_timeout = 600.0
+    # +10s margin: agent-side polling resolves first under normal flow.
+    return agent_timeout + 10.0
+
+
 def _define_discord_view_classes() -> None:
     """Register Discord UI view classes as module globals.
 
@@ -5611,12 +5642,16 @@ def _define_discord_view_classes() -> None:
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
         ):
-            super().__init__(timeout=300)  # 5-minute timeout
+            super().__init__(timeout=_clarify_view_timeout())
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
+            # discord.py doesn't auto-track the message for channel.send views;
+            # send_clarify stashes it here after send so on_timeout can edit
+            # the embed in place.
+            self.message = None  # type: ignore[assignment]
 
             for index, choice in enumerate(self.choices):
                 # Discord button labels are capped at 80 chars.
@@ -5769,9 +5804,54 @@ def _define_discord_view_classes() -> None:
                     pass
 
         async def on_timeout(self):
+            """View timed out before user responded.
+
+            Two responsibilities the previous implementation missed:
+              1. Resolve the gateway clarify entry (with the empty-string
+                 sentinel) so the agent thread unblocks immediately,
+                 instead of waiting another N seconds for its own timeout.
+                 ``clarify_gateway.clear_session`` already uses ``""`` as
+                 the cancel sentinel; we reuse it here.
+              2. Edit the embed in place so the user sees that their
+                 buttons are dead — disabling components alone leaves the
+                 prompt visually identical to a live one. Late clicks on
+                 disabled components are silently dropped by Discord, so
+                 without an embed update the user has no signal.
+            """
+            if self.resolved:
+                # Already resolved by a button press or text intercept.
+                # Nothing for the timeout handler to do.
+                return
             self.resolved = True
             for child in self.children:
                 child.disabled = True
+
+            # (1) Unblock the agent.
+            try:
+                from tools.clarify_gateway import resolve_gateway_clarify
+                resolve_gateway_clarify(self.clarify_id, "")
+            except Exception:
+                logger.warning(
+                    "Discord clarify on_timeout resolve failed (id=%s)",
+                    self.clarify_id, exc_info=True,
+                )
+
+            # (2) Update the embed so the UI reflects the timeout.
+            msg = getattr(self, "message", None)
+            if msg is not None:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else discord.Embed()
+                    embed.color = discord.Color.greyple()
+                    embed.set_footer(text="Timed out — no response captured.")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    # Message may have been deleted, channel gone, or
+                    # permissions revoked. Disabled components on the
+                    # cached client view are still better than nothing.
+                    logger.debug(
+                        "Discord clarify on_timeout edit_message failed (id=%s)",
+                        self.clarify_id, exc_info=True,
+                    )
 
     class ClarifyMultiChoiceView(discord.ui.View):
         """Multi-select variant of ClarifyChoiceView.
@@ -5819,12 +5899,14 @@ def _define_discord_view_classes() -> None:
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
         ):
-            super().__init__(timeout=300)  # 5-minute timeout
+            super().__init__(timeout=_clarify_view_timeout())
             self.choices = list(choices)[:25]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
+            # See ClarifyChoiceView for why we stash the message manually.
+            self.message = None  # type: ignore[assignment]
 
             options: List["discord.SelectOption"] = []
             for index, choice in enumerate(self.choices):
@@ -6004,9 +6086,41 @@ def _define_discord_view_classes() -> None:
                     pass
 
         async def on_timeout(self):
+            """View timed out before user submitted.
+
+            Mirrors ClarifyChoiceView.on_timeout — see that docstring for
+            the rationale. The empty-string sentinel for multi-select
+            short-circuits to ``user_responses=[]`` agent-side
+            (clarify_tool checks ``if raw else []`` before splitting on
+            U+001F, so an empty payload never produces a phantom choice).
+            """
+            if self.resolved:
+                return
             self.resolved = True
             for child in self.children:
                 child.disabled = True
+
+            try:
+                from tools.clarify_gateway import resolve_gateway_clarify
+                resolve_gateway_clarify(self.clarify_id, "")
+            except Exception:
+                logger.warning(
+                    "Discord clarify-multi on_timeout resolve failed (id=%s)",
+                    self.clarify_id, exc_info=True,
+                )
+
+            msg = getattr(self, "message", None)
+            if msg is not None:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else discord.Embed()
+                    embed.color = discord.Color.greyple()
+                    embed.set_footer(text="Timed out — no response captured.")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    logger.debug(
+                        "Discord clarify-multi on_timeout edit_message failed (id=%s)",
+                        self.clarify_id, exc_info=True,
+                    )
 if DISCORD_AVAILABLE:
     _define_discord_view_classes()
 
