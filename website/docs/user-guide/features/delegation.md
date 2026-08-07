@@ -142,9 +142,74 @@ process disappears while it is still running is recorded as `unknown`, because
 Hermes cannot prove whether its external side effects happened. Pending and
 delivered records are bounded and profile-local.
 
-## Model Override
+## Per-Task Model and Provider Routing
 
-You can configure a different model for subagents via `config.yaml` — useful for delegating simple tasks to cheaper/faster models:
+You can route delegated work to a different model or provider at call time. A
+top-level route applies to every child in the call:
+
+```python
+delegate_task(
+    goal="Summarize the latest failing test output",
+    model="haiku",
+)
+
+delegate_task(
+    goal="Review the authentication refactor",
+    model="sonnet",
+    provider="anthropic",
+)
+```
+
+Each batch entry may override that default independently:
+
+```python
+delegate_task(
+    model="haiku",
+    provider="anthropic",
+    tasks=[
+        {
+            "goal": "List files touched by this change",
+        },
+        {
+            "goal": "Review the concurrency design",
+            "model": "sonnet",
+        },
+        {
+            "goal": "Give an independent implementation critique",
+            "model": "qwen3.6-plus",
+            "provider": "opencode-go",
+        },
+    ],
+)
+```
+
+Model values use the same aliases and syntax as `/model`. Inline provider
+selection is supported when no structured `provider` field is present:
+
+```python
+delegate_task(
+    goal="Check OpenRouter availability",
+    model="llama-3.3-70b:free --provider openrouter",
+)
+```
+
+Prefer the structured `provider` field in generated JSON tool calls. Supplying
+both forms is an error—for example, `provider="anthropic"` together with
+`model="sonnet --provider openrouter"` is rejected instead of silently choosing
+one. Do not use `provider:model` colon-prefix syntax; colons remain valid inside
+model IDs and variant suffixes such as `:free`.
+
+Resolution precedence is independent for model and provider:
+
+1. Per-task `tasks[].model` / `tasks[].provider`
+2. Top-level `model` / `provider`
+3. `delegation.model` / `delegation.provider` in `config.yaml`
+4. Parent agent model/provider
+
+### Configuration Default
+
+You can still configure a default route for all subagents. It applies when a
+call does not provide a higher-precedence override:
 
 ```yaml
 # In ~/.hermes/config.yaml
@@ -153,7 +218,8 @@ delegation:
   provider: "openrouter"              # Optional: route subagents to a different provider
 ```
 
-If omitted, subagents use the same model as the parent.
+If every override is omitted, subagents keep the existing parent inheritance
+behavior.
 
 ### Cost strategy: frontier planner, inexpensive workers
 
