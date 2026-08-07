@@ -15,6 +15,7 @@ from gateway.config import GatewayConfig, Platform, PlatformConfig
 from plugins.platforms.telegram import adapter as tg_adapter
 from plugins.platforms.telegram.adapter import TelegramAdapter
 from gateway.run import GatewayRunner
+from plugins.platforms.telegram.telegram_network import iter_exception_graph
 
 
 @pytest.fixture(autouse=True)
@@ -814,7 +815,7 @@ async def test_disconnect_advances_past_cancellation_swallowing_lifecycle(monkey
 class TestIterExceptionGraph:
     def test_flat_single(self):
         err = ValueError("boom")
-        assert list(tg_adapter._iter_exception_graph(err)) == [err]
+        assert list(iter_exception_graph(err)) == [err]
 
     def test_walks_cause_chain(self):
         root = ValueError("root")
@@ -822,14 +823,14 @@ class TestIterExceptionGraph:
         mid.__cause__ = root
         top = Exception("top")
         top.__cause__ = mid
-        seen = list(tg_adapter._iter_exception_graph(top))
+        seen = list(iter_exception_graph(top))
         assert top in seen and mid in seen and root in seen
 
     def test_walks_context_chain(self):
         root = ValueError("during handling")
         top = RuntimeError("top")
         top.__context__ = root
-        seen = list(tg_adapter._iter_exception_graph(top))
+        seen = list(iter_exception_graph(top))
         assert top in seen and root in seen
 
     def test_cycle_guard(self):
@@ -837,7 +838,7 @@ class TestIterExceptionGraph:
         b = RuntimeError("b")
         a.__cause__ = b
         b.__cause__ = a  # cycle
-        seen = list(tg_adapter._iter_exception_graph(a))
+        seen = list(iter_exception_graph(a))
         assert seen.count(a) == 1 and seen.count(b) == 1  # terminates, no dupes
 
     def test_diamond_no_duplicates(self):
@@ -845,7 +846,7 @@ class TestIterExceptionGraph:
         left = RuntimeError("left"); left.__cause__ = root
         right = TypeError("right"); right.__cause__ = root
         top = Exception("top"); top.__cause__ = left; top.__context__ = right
-        seen = list(tg_adapter._iter_exception_graph(top))
+        seen = list(iter_exception_graph(top))
         assert seen.count(root) == 1
 
 

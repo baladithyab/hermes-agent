@@ -7,7 +7,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 import httpx
 
@@ -16,6 +16,21 @@ from agent.ssl_verify import platform_ssl_context
 logger = logging.getLogger(__name__)
 
 _TELEGRAM_API_HOST = "api.telegram.org"
+
+
+def iter_exception_graph(error: BaseException) -> Iterator[BaseException]:
+    """Yield ``error`` and every ``__cause__``/``__context__`` ancestor (DFS, cycle-safe) —
+    PTB wraps httpx errors, so classifiers must inspect the whole graph."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        cur = stack.pop()
+        ident = id(cur)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        yield cur
+        stack.extend(x for x in (getattr(cur, "__cause__", None), getattr(cur, "__context__", None)) if x is not None)
 
 
 def _describe_transport_error(error: Exception) -> str:

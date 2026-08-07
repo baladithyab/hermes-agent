@@ -1397,7 +1397,7 @@ Reply "yes"/"y" to approve or "no"/"n" to deny.
 
 ## Interactive Prompts (clarify)
 
-When the agent calls the `clarify` tool — to ask which approach you prefer, get post-task feedback, or check before a non-trivial decision — Telegram renders the question with **inline keyboard buttons**:
+When the agent calls the `clarify` tool to ask a single-select question, Telegram renders **inline keyboard buttons**:
 
 > ❓ Which framework should I use for the dashboard?
 >
@@ -1405,6 +1405,8 @@ When the agent calls the `clarify` tool — to ask which approach you prefer, ge
 > [✏️ Other (type answer)]
 
 Tap a button to answer, or tap **Other** to type a free-form response (the next message you send becomes the answer). Open-ended `clarify` calls (no preset choices) skip the buttons and just capture your next message.
+
+Multi-select questions use a numbered-text prompt rather than single-tap buttons. Reply with several option numbers separated by commas or spaces, such as `1, 3` or `1 3`. Matching option text or a custom answer also works.
 
 Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `3600` seconds). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and adapts rather than hanging. Reply `skip` to skip a question.
 

@@ -12,7 +12,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 from hermes_cli import setup_platforms
 
 logger = logging.getLogger(__name__)
@@ -72,21 +72,6 @@ async def _await_with_thread_deadline(
     if result.timed_out:
         raise asyncio.TimeoutError(f"timed out after {timeout:.0f}s ({label})")
     return result.value
-
-
-def _iter_exception_graph(error: BaseException) -> "Iterator[BaseException]":
-    """Yield ``error`` and every ``__cause__``/``__context__`` ancestor (DFS, cycle-safe) —
-    PTB wraps httpx errors, so classifiers must inspect the whole graph."""
-    seen: set[int] = set()
-    stack: list[BaseException] = [error]
-    while stack:
-        cur = stack.pop()
-        ident = id(cur)
-        if ident in seen:
-            continue
-        seen.add(ident)
-        yield cur
-        stack.extend(x for x in (getattr(cur, "__cause__", None), getattr(cur, "__context__", None)) if x is not None)
 
 
 async def _shutdown_abandoned_app(app) -> None:
@@ -182,7 +167,8 @@ from plugins.platforms.telegram.telegram_entities import expand_link_entities
 from plugins.platforms.telegram.telegram_held_inbound import TelegramHeldInboundMixin
 from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
 from plugins.platforms.telegram.telegram_network import (
-    SEED_FALLBACK_IPS, TelegramFallbackTransport, discover_fallback_ips, parse_fallback_ip_env, tcp_keepalive_socket_options)
+    SEED_FALLBACK_IPS, TelegramFallbackTransport, discover_fallback_ips, iter_exception_graph,
+    parse_fallback_ip_env, tcp_keepalive_socket_options)
 from utils import env_float, env_int
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -1239,7 +1225,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
     @staticmethod
     def _exception_graph_matches(error: Exception, name_marker: str, *text_markers: str) -> bool:
         """True when any exception in ``error``'s cause/context graph matches by class name or text."""
-        for cur in _iter_exception_graph(error):
+        for cur in iter_exception_graph(error):
             text = str(cur).lower()
             if name_marker in cur.__class__.__name__.lower() or any(m in text for m in text_markers):
                 return True
@@ -1255,7 +1241,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
     def _looks_like_pool_timeout(error: Exception) -> bool:
         """True when a TimedOut wraps ``httpx.PoolTimeout``: PTB says "Request was *not* sent", so
         re-sending cannot duplicate. Matches class AND text to survive rewording."""
-        for cur in _iter_exception_graph(error):
+        for cur in iter_exception_graph(error):
             name = cur.__class__.__name__.lower()
             text = str(cur).lower()
             if "pooltimeout" in name or "pool timeout" in text or ("connection pool" in text and "occupied" in text):
@@ -4268,8 +4254,17 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
     async def send_clarify(
         self, chat_id: str, question: str, choices: Optional[list], clarify_id: str, session_key: str,
         metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        """Render a clarify prompt: numbered buttons per choice plus "✏️ Other (type answer)" (flips to
-        text-capture mode); without choices, plain question and the gateway text-intercept captures."""
+        """Render single-select with numbered buttons and "Other"; multi-select uses the
+        numbered-text fallback. Open-ended prompts capture the next message."""
+        # Inline buttons submit immediately and cannot express a multi-selection.
+        if choices:
+            from tools import clarify_gateway as _cg
+            with _cg._lock:
+                is_multi = bool(getattr(_cg._entries.get(clarify_id), "multi_select", False))
+            if is_multi:
+                return await super().send_clarify(
+                    chat_id, question, choices, clarify_id, session_key, metadata)
+
         def build():
             text = f"❓ {_html.escape(question)}"
             keyboard = None

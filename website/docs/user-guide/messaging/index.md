@@ -459,10 +459,11 @@ If you find the busy acknowledgment noisy, set `display.busy_ack_enabled: false`
 
 ## Clarify Questions (Multi-Select)
 
-When the agent uses the `clarify` tool to ask you a question, the gateway renders the choices as a numbered prompt (or native buttons on platforms that support them). Clarify supports **multi-select** questions too — the agent can let you pick several options at once:
+When the agent uses the `clarify` tool to ask you a question, the gateway renders the choices as a numbered prompt or native controls. Multi-select questions let you pick several options at once:
 
-- **Messaging platforms** — the prompt says "Multiple selections allowed"; reply with the numbers separated by commas or spaces (e.g. `1, 3`), the option text, or your own free-form answer.
-- **Classic CLI / TUI** — multi-select renders as checkboxes: **Space** toggles an option, **Enter** submits the selection.
+- Discord uses a native dropdown for multi-select questions. Select the options together, or click **Other** to type a custom answer.
+- Telegram, WhatsApp Cloud, and platforms using the text fallback show a numbered list with "Multiple selections allowed". Reply with numbers separated by commas or spaces, such as `1, 3` or `1 3`, matching option text, or your own answer.
+- The classic CLI and TUI use checkboxes. **Space** toggles an option and **Enter** submits the selection.
 
 Single-select prompts behave as before: pick one option by number, button, or text, or type your own answer via the "Other" path.
 
