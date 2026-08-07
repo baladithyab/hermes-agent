@@ -30,6 +30,8 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    _resolve_explicit_model_provider_credentials,
+    _resolve_model_provider_override,
 )
 from hermes_state import SessionDB
 
@@ -66,13 +68,23 @@ class TestDelegateRequirements(unittest.TestCase):
         # array); legacy top-level goal/context/output_schema stay
         # handler-accepted but unadvertised.
         self.assertIn("tasks", props)
+        # Upstream narrowed the schema: legacy single-goal shape (goal /
+        # context / output_schema) and depth-derived role are handler-accepted
+        # but deliberately unadvertised. The fork patch adds model/provider
+        # routing (top-level + per-task) on top of the narrowed shape.
         self.assertNotIn("goal", props)
         self.assertNotIn("context", props)
+        self.assertNotIn("role", props)
         self.assertNotIn("output_schema", props)
+        self.assertNotIn("background", props)
+        self.assertIn("model", props)
+        self.assertIn("provider", props)
         task_props = props["tasks"]["items"]["properties"]
         self.assertIn("goal", task_props)
         self.assertIn("context", task_props)
         self.assertIn("output_schema", task_props)
+        self.assertIn("model", task_props)
+        self.assertIn("provider", task_props)
         # toolsets is intentionally NOT exposed to the model — subagents always
         # inherit the parent's toolsets. Letting the model name toolsets was a
         # capability-selection surface the model should not control.
@@ -1143,6 +1155,252 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             requested="crof.ai", target_model="deepseek-v4-pro-CEER"
         )
 
+
+class TestResolveModelProviderOverride(unittest.TestCase):
+    """Model/provider precedence is resolved before child construction."""
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_no_override_inherits_parent_implicitly(self, _mock_cfg):
+        parent = _make_mock_parent()
+        self.assertEqual(
+            _resolve_model_provider_override({}, None, None, parent),
+            (None, None),
+        )
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"model": "config-model", "provider": "config-provider"},
+    )
+    def test_precedence_task_then_top_level_then_config(self, _mock_cfg):
+        parent = _make_mock_parent()
+
+        self.assertEqual(
+            _resolve_model_provider_override(
+                {"model": "task-model", "provider": "task-provider"},
+                "top-model",
+                "top-provider",
+                parent,
+            ),
+            ("task-model", "task-provider"),
+        )
+        self.assertEqual(
+            _resolve_model_provider_override(
+                {}, "top-model", "top-provider", parent
+            ),
+            ("top-model", "top-provider"),
+        )
+        self.assertEqual(
+            _resolve_model_provider_override({}, None, None, parent),
+            ("config-model", "config-provider"),
+        )
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_inline_provider_is_parsed(self, _mock_cfg):
+        parent = _make_mock_parent()
+        self.assertEqual(
+            _resolve_model_provider_override(
+                {"model": "sonnet --provider anthropic"},
+                None,
+                None,
+                parent,
+            ),
+            ("sonnet", "anthropic"),
+        )
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_structured_and_inline_provider_conflict(self, _mock_cfg):
+        parent = _make_mock_parent()
+        with self.assertRaisesRegex(
+            ValueError,
+            "Cannot specify both 'provider' parameter and inline '--provider'",
+        ):
+            _resolve_model_provider_override(
+                {
+                    "model": "sonnet --provider anthropic",
+                    "provider": "openrouter",
+                },
+                None,
+                None,
+                parent,
+            )
+
+
+class TestResolveExplicitModelProviderCredentials(unittest.TestCase):
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.model_switch.switch_model")
+    def test_uses_shared_model_switch_pipeline(self, mock_switch, mock_runtime):
+        mock_switch.return_value = types.SimpleNamespace(
+            success=True,
+            new_model="claude-sonnet-4-6",
+            target_provider="anthropic",
+            base_url="https://api.anthropic.com/v1",
+            api_key="ant-test-key",
+            api_mode="anthropic_messages",
+            error_message="",
+        )
+        mock_runtime.return_value = {
+            "request_overrides": {"temperature": 0},
+            "max_output_tokens": 4096,
+            "command": None,
+            "args": [],
+        }
+        parent = _make_mock_parent()
+
+        creds = _resolve_explicit_model_provider_credentials(
+            "sonnet",
+            "anthropic",
+            parent,
+            {
+                "model": None,
+                "provider": None,
+                "base_url": None,
+                "api_key": None,
+            },
+        )
+
+        self.assertEqual(creds["model"], "claude-sonnet-4-6")
+        self.assertEqual(creds["provider"], "anthropic")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+        self.assertEqual(creds["max_output_tokens"], 4096)
+        self.assertEqual(creds["request_overrides"], {"temperature": 0})
+        self.assertEqual(mock_switch.call_args.kwargs["raw_input"], "sonnet")
+        self.assertEqual(
+            mock_switch.call_args.kwargs["explicit_provider"], "anthropic"
+        )
+
+    @patch("hermes_cli.model_switch.switch_model")
+    def test_resolution_failure_is_actionable(self, mock_switch):
+        mock_switch.return_value = types.SimpleNamespace(
+            success=False,
+            error_message="Unknown model 'banana'",
+        )
+        with self.assertRaisesRegex(ValueError, "banana"):
+            _resolve_explicit_model_provider_credentials(
+                "banana",
+                "openrouter",
+                _make_mock_parent(),
+                {},
+            )
+
+
+class TestDelegateTaskModelProviderRouting(unittest.TestCase):
+    def _config_creds(self):
+        return {
+            "model": "config-model",
+            "provider": "config-provider",
+            "base_url": "https://config.example/v1",
+            "api_key": "config-key",
+            "api_mode": "chat_completions",
+            "request_overrides": None,
+            "max_output_tokens": None,
+            "command": None,
+            "args": [],
+        }
+
+    def _run(self, *, goal=None, tasks=None, model=None, provider=None):
+        parent = _make_mock_parent()
+        routed = []
+        built = []
+
+        def resolve_explicit(model_input, provider_input, parent_agent, base_creds):
+            routed.append((model_input, provider_input))
+            return {
+                **self._config_creds(),
+                "model": model_input,
+                "provider": provider_input,
+                "base_url": f"https://{provider_input}.example/v1",
+            }
+
+        def build_child(**kwargs):
+            built.append(kwargs)
+            return MagicMock(session_id=f"child-{kwargs['task_index']}")
+
+        def run_child(task_index, goal, child, parent_agent, **_kwargs):
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "done",
+                "duration_seconds": 0.0,
+            }
+
+        with (
+            patch("tools.delegate_tool._load_config", return_value={"max_iterations": 5}),
+            patch(
+                "tools.delegate_tool._resolve_delegation_credentials",
+                return_value=self._config_creds(),
+            ),
+            patch(
+                "tools.delegate_tool._resolve_explicit_model_provider_credentials",
+                side_effect=resolve_explicit,
+            ) as explicit_resolver,
+            patch(
+                "tools.delegate_tool._build_child_preserving_parent_tools",
+                side_effect=build_child,
+            ),
+            patch("tools.delegate_tool._run_single_child", side_effect=run_child),
+            patch("tools.delegate_tool._finalize_child_results"),
+        ):
+            result = json.loads(
+                delegate_task(
+                    goal=goal,
+                    tasks=tasks,
+                    model=model,
+                    provider=provider,
+                    parent_agent=parent,
+                )
+            )
+        return result, routed, built, explicit_resolver
+
+    def test_per_task_model_override(self):
+        _result, routed, built, _resolver = self._run(
+            tasks=[
+                {"goal": "Inspect model routing A", "model": "haiku"},
+                {"goal": "Inspect model routing B", "model": "sonnet"},
+            ]
+        )
+        self.assertEqual([model for model, _provider in routed], ["haiku", "sonnet"])
+        self.assertEqual([call["model"] for call in built], ["haiku", "sonnet"])
+
+    def test_per_task_provider_override(self):
+        _result, routed, built, _resolver = self._run(
+            tasks=[
+                {
+                    "goal": "Inspect provider routing A",
+                    "model": "sonnet",
+                    "provider": "anthropic",
+                },
+                {
+                    "goal": "Inspect provider routing B",
+                    "model": "qwen",
+                    "provider": "openrouter",
+                },
+            ]
+        )
+        self.assertEqual(routed, [("sonnet", "anthropic"), ("qwen", "openrouter")])
+        self.assertEqual(
+            [call["override_provider"] for call in built],
+            ["anthropic", "openrouter"],
+        )
+
+    def test_per_task_model_beats_top_level_model(self):
+        _result, routed, _built, _resolver = self._run(
+            model="sonnet",
+            provider="anthropic",
+            tasks=[
+                {"goal": "Inspect precedence route A", "model": "haiku"},
+                {"goal": "Inspect precedence route B"},
+            ],
+        )
+        self.assertEqual(routed, [("haiku", "anthropic"), ("sonnet", "anthropic")])
+
+    def test_no_override_uses_existing_config_credentials(self):
+        _result, routed, built, resolver = self._run(goal="Inspect inheritance")
+        resolver.assert_not_called()
+        self.assertEqual(routed, [])
+        self.assertEqual(built[0]["model"], "config-model")
+        self.assertEqual(built[0]["override_provider"], "config-provider")
+
+
 class TestDelegationProviderIntegration(unittest.TestCase):
     """Integration tests: delegation config → _run_single_child → AIAgent construction."""
 
@@ -1637,6 +1895,8 @@ class TestDispatchDelegateTask(unittest.TestCase):
                 parent,
                 {
                     "goal": "test",
+                    "model": "sonnet",
+                    "provider": "anthropic",
                     "acp_command": "claude",
                     "acp_args": ["--acp", "--stdio"],
                     "tasks": [
@@ -1652,8 +1912,43 @@ class TestDispatchDelegateTask(unittest.TestCase):
         self.assertNotIn("acp_command", captured)
         self.assertNotIn("acp_args", captured)
         self.assertEqual(captured["goal"], "test")
+        self.assertEqual(captured["model"], "sonnet")
+        self.assertEqual(captured["provider"], "anthropic")
         self.assertNotIn("acp_command", captured["tasks"][0])
         self.assertNotIn("acp_args", captured["tasks"][0])
+
+    def test_registry_handler_forwards_routes_but_strips_acp(self):
+        from tools.registry import registry
+
+        captured = {}
+
+        def fake_delegate_task(**kwargs):
+            captured.update(kwargs)
+            return "{}"
+
+        entry = registry.get_entry("delegate_task")
+        with patch("tools.delegate_tool.delegate_task", fake_delegate_task):
+            entry.handler(
+                {
+                    "model": "sonnet",
+                    "provider": "anthropic",
+                    "tasks": [
+                        {
+                            "goal": "Inspect nested route",
+                            "model": "haiku",
+                            "provider": "anthropic",
+                            "acp_command": "codex",
+                        }
+                    ],
+                },
+                parent_agent=_make_mock_parent(),
+            )
+
+        self.assertEqual(captured["model"], "sonnet")
+        self.assertEqual(captured["provider"], "anthropic")
+        self.assertEqual(captured["tasks"][0]["model"], "haiku")
+        self.assertEqual(captured["tasks"][0]["provider"], "anthropic")
+        self.assertNotIn("acp_command", captured["tasks"][0])
 
 class TestDelegateEventEnum(unittest.TestCase):
     """Tests for DelegateEvent enum and back-compat aliases."""
