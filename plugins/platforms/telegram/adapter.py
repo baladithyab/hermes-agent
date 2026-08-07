@@ -6383,6 +6383,31 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        # Telegram's buttons resolve immediately and cannot express a
+        # multi-select submission. Use the universal numbered-text fallback
+        # for those prompts; the gateway parser accepts comma/space selections.
+        _is_multi = False
+        if choices:
+            try:
+                from tools import clarify_gateway as _cg
+
+                with _cg._lock:
+                    _entry = _cg._entries.get(clarify_id)
+                _is_multi = bool(
+                    _entry and getattr(_entry, "multi_select", False)
+                )
+            except Exception:
+                _is_multi = False
+        if _is_multi:
+            return await super().send_clarify(
+                chat_id,
+                question,
+                choices,
+                clarify_id,
+                session_key,
+                metadata,
+            )
+
         try:
             text = f"❓ {_html.escape(question)}"
             thread_id = self._metadata_thread_id(metadata)
