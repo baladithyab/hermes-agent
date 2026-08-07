@@ -784,6 +784,18 @@ class ToolRegistry:
         registrations that would shadow an existing tool from a different
         toolset are rejected to prevent accidental overwrites.
         """
+        # Autodetect coroutine handlers so a forgotten ``is_async=True`` flag
+        # can never cause a raw coroutine to escape ``dispatch()`` (which then
+        # explodes at ``len(result)`` with "coroutine has no len()"). Trusting
+        # the caller to pass the flag is fragile; inspection is authoritative.
+        if not is_async:
+            try:
+                import inspect as _inspect
+                if _inspect.iscoroutinefunction(handler):
+                    is_async = True
+            except Exception:
+                pass
+
         handler_owner = self._plugin_owner_of(handler)
         caller_owner = self._plugin_namespace_of_module(self._caller_module())
         owner = caller_owner or handler_owner
