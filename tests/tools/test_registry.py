@@ -1,5 +1,6 @@
 """Tests for the central tool registry."""
 
+import asyncio
 import json
 import logging
 import threading
@@ -39,6 +40,29 @@ class TestRegisterAndDispatch:
         )
         result = json.loads(reg.dispatch("alpha", {}))
         assert result == {"ok": True}
+
+    def test_dispatch_awaits_async_handlers_without_registration_flag(self):
+        async def total(args):
+            await asyncio.sleep(0)
+            return json.dumps({"total": sum(args["values"])})
+
+        reg = ToolRegistry()
+        reg.register(
+            name="total", toolset="core", schema=_make_schema("total"), handler=total,
+        )
+        assert json.loads(reg.dispatch("total", {"values": [2, 3, 7]})) == {"total": 12}
+
+    def test_dispatch_awaits_explicit_sync_coroutine_wrapper(self):
+        async def total(args):
+            await asyncio.sleep(0)
+            return json.dumps({"total": sum(args["values"])})
+
+        reg = ToolRegistry()
+        reg.register(
+            name="total", toolset="core", schema=_make_schema("total"),
+            handler=lambda args: total(args), is_async=True,
+        )
+        assert json.loads(reg.dispatch("total", {"values": [2, 3, 7]})) == {"total": 12}
 
     def test_dispatch_withholds_injected_kwargs_from_narrow_plugin_handler(self):
         """model_tools injects task_id/session_id/user_task on every call; a third-party ``handle(args)``
