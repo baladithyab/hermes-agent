@@ -11,6 +11,7 @@ from tools.clarify_tool import (
     MAX_QUESTIONS,
     CLARIFY_SCHEMA,
     _flatten_choice,
+    _parse_multi_select_response,
 )
 
 
@@ -231,6 +232,16 @@ class TestClarifyToolMultiSelect:
         assert result["user_response"] == ["red"]
         assert isinstance(result["user_response"], list)
 
+    def test_multi_select_json_array_response(self):
+        """Native UIs may return a JSON array string."""
+        result = json.loads(clarify_tool(
+            "Which colors?",
+            choices=["red", "blue", "green"],
+            multi_select=True,
+            callback=lambda _question, _choices: '["red", "green"]',
+        ))
+        assert result["user_response"] == ["red", "green"]
+
 
     def test_multi_select_max_choices_enforced(self):
         """MAX_CHOICES enforcement should still work with multi_select."""
@@ -320,6 +331,30 @@ class TestClarifyRecommendedLabel:
         result = json.loads(clarify_tool("Thoughts?", callback=cb))
         assert result["choices_offered"] is None
         assert result["user_response"] == "whatever"
+
+
+class TestParseMultiSelectResponse:
+    def test_handles_list(self):
+        assert _parse_multi_select_response([" red ", "", "blue"]) == [
+            "red",
+            "blue",
+        ]
+
+    def test_handles_json_string(self):
+        assert _parse_multi_select_response('["red", " blue "]') == [
+            "red",
+            "blue",
+        ]
+
+    def test_handles_comma_separated_string(self):
+        assert _parse_multi_select_response("red, blue, , green") == [
+            "red",
+            "blue",
+            "green",
+        ]
+
+    def test_empty_selection_returns_empty_list(self):
+        assert _parse_multi_select_response("") == []
 
 
 class TestInvokeCallbackDispatch:

@@ -7809,21 +7809,50 @@ class DiscordAdapter(BasePlatformAdapter):
             clean_choices = [
                 s for s in (_flatten_choice(c) for c in (choices or [])) if s
             ]
-            # Discord allows up to 5 buttons per row, 5 rows per view = 25.
-            # We reserve one slot for the "Other" button, so cap at 24 choices.
-            clean_choices = clean_choices[:24]
+            # Multi-select is registered on the gateway entry so adapters keep
+            # their stable send_clarify signature across every platform.
+            _is_multi = False
+            try:
+                from tools import clarify_gateway as _cg
+
+                with _cg._lock:
+                    _entry = _cg._entries.get(clarify_id)
+                _is_multi = bool(
+                    _entry and getattr(_entry, "multi_select", False)
+                )
+            except Exception:
+                _is_multi = False
+
+            # Discord select menus allow 25 options. Button views reserve one
+            # of the 25 component slots for the "Other" escape hatch.
+            clean_choices = clean_choices[:25 if _is_multi else 24]
 
             if clean_choices:
+                if _is_multi:
+                    choice_hint = (
+                        "Select all that apply below, or click ✏️ Other to "
+                        "type a custom answer."
+                    )
+                    view = ClarifyMultiChoiceView(
+                        choices=clean_choices,
+                        clarify_id=clarify_id,
+                        allowed_user_ids=self._allowed_user_ids,
+                        allowed_role_ids=self._allowed_role_ids,
+                    )
+                else:
+                    choice_hint = (
+                        "Pick one below, or click ✏️ Other to type a custom answer."
+                    )
+                    view = ClarifyChoiceView(
+                        choices=clean_choices,
+                        clarify_id=clarify_id,
+                        allowed_user_ids=self._allowed_user_ids,
+                        allowed_role_ids=self._allowed_role_ids,
+                    )
                 embed.add_field(
                     name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
+                    value=choice_hint,
                     inline=False,
-                )
-                view = ClarifyChoiceView(
-                    choices=clean_choices,
-                    clarify_id=clarify_id,
-                    allowed_user_ids=self._allowed_user_ids,
-                    allowed_role_ids=self._allowed_role_ids,
                 )
             else:
                 embed.add_field(
@@ -7836,7 +7865,7 @@ class DiscordAdapter(BasePlatformAdapter):
             # Mirror the question in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
             clarify_tail = (
-                "\n\nPick one below, or click ✏️ Other to type a custom answer."
+                f"\n\n{choice_hint}"
                 if clean_choices
                 else "\n\nReply in this channel with your answer."
             )
@@ -8897,6 +8926,46 @@ def _resolve_exec_approval_admin_gate(
     return (True, admin_ids)
 
 
+async def _expire_clarify_view(
+    view,
+    clarify_id: str,
+    embed_text: str = "⏱ Prompt expired — no action taken",
+) -> None:
+    """Expire a Discord clarify prompt and unblock its waiting agent."""
+    if getattr(view, "resolved", False):
+        return
+
+    view.resolved = True
+    for child in view.children:
+        child.disabled = True
+    view.clear_items()
+
+    # The Discord component timeout and the gateway wait are independent.
+    # Resolve first so a failed best-effort message edit can never leave the
+    # agent worker pinned behind an unanswered clarify prompt.
+    try:
+        from tools.clarify_gateway import resolve_gateway_clarify
+
+        resolve_gateway_clarify(clarify_id, "")
+    except Exception:
+        logger.debug(
+            "Discord clarify timeout resolve failed (id=%s)",
+            clarify_id,
+            exc_info=True,
+        )
+
+    msg = getattr(view, "_message", None)
+    if msg:
+        try:
+            embed = msg.embeds[0] if msg.embeds else None
+            if embed:
+                embed.color = discord.Color.greyple()
+                embed.set_footer(text=embed_text)
+            await msg.edit(embed=embed, view=view)
+        except Exception:
+            pass
+
+
 def _define_discord_view_classes() -> None:
     """Register Discord UI view classes as module globals.
 
@@ -8907,7 +8976,7 @@ def _define_discord_view_classes() -> None:
     lazy install sets DISCORD_AVAILABLE=True but leaves the classes
     undefined, causing NameError on the first button interaction.
     """
-    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, ChoicePickerView
+    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, ClarifyMultiChoiceView, ChoicePickerView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -9957,20 +10026,175 @@ def _define_discord_view_classes() -> None:
                     pass
 
         async def on_timeout(self):
+            await _expire_clarify_view(self, self.clarify_id)
+
+    class ClarifyMultiChoiceView(discord.ui.View):
+        """Select-menu view for clarify prompts that accept many choices."""
+
+        def __init__(
+            self,
+            choices: List[str],
+            clarify_id: str,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=_read_discord_prompt_timeout())
+            self.choices = list(choices)[:25]
+            self.clarify_id = clarify_id
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+            self._message = None
+
+            options = [
+                discord.SelectOption(
+                    label=_truncate_discord_component_text(
+                        str(choice), _DISCORD_SELECT_FIELD_LIMIT
+                    ),
+                    value=str(index),
+                )
+                for index, choice in enumerate(self.choices)
+            ]
+            select = discord.ui.Select(
+                placeholder="Select all that apply",
+                min_values=0,
+                max_values=len(options),
+                options=options,
+                custom_id=f"clarify:{clarify_id}:multi",
+                row=0,
+            )
+            select.callback = self._on_select
+            self.add_item(select)
+
+            other_btn = discord.ui.Button(
+                label="✏️ Other (type answer)",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"clarify:{clarify_id}:other",
+                row=1,
+            )
+            other_btn.callback = self._on_other
+            self.add_item(other_btn)
+
+        def _check_auth(self, interaction: "discord.Interaction") -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        async def _on_select(self, interaction: "discord.Interaction") -> None:
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True,
+                )
+                return
+
+            selected_values = []
+            for raw_value in (getattr(interaction, "data", {}) or {}).get(
+                "values", []
+            ):
+                try:
+                    index = int(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(self.choices):
+                    selected_values.append(self.choices[index])
+
             self.resolved = True
             for child in self.children:
                 child.disabled = True
-            # Visually update the Discord message so buttons appear disabled.
-            msg = getattr(self, '_message', None)
-            if msg:
+
+            embed = interaction.message.embeds[0] if (
+                interaction.message and interaction.message.embeds
+            ) else None
+            if embed:
+                user = getattr(interaction, "user", None)
+                display_name = getattr(user, "display_name", "user")
+                selected_text = ", ".join(selected_values) or "no options selected"
+                embed.color = discord.Color.green()
+                embed.set_footer(
+                    text=f"Answered by {display_name}: {selected_text}"
+                )
+
+            try:
+                await interaction.response.edit_message(embed=embed, view=self)
+            except Exception:
+                logger.debug(
+                    "Discord clarify multi-select edit failed for %s",
+                    self.clarify_id,
+                    exc_info=True,
+                )
                 try:
-                    embed = msg.embeds[0] if msg.embeds else None
-                    if embed:
-                        embed.color = discord.Color.greyple()
-                        embed.set_footer(text="⏱ Prompt expired — no action taken")
-                    await msg.edit(embed=embed, view=self)
+                    await interaction.response.defer()
                 except Exception:
                     pass
+
+            try:
+                from tools.clarify_gateway import resolve_gateway_clarify
+
+                resolve_gateway_clarify(
+                    self.clarify_id,
+                    json.dumps(selected_values, ensure_ascii=False),
+                )
+            except Exception:
+                logger.error(
+                    "Discord clarify multi-select resolution failed (id=%s)",
+                    self.clarify_id,
+                    exc_info=True,
+                )
+
+        async def _on_other(self, interaction: "discord.Interaction") -> None:
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True,
+                )
+                return
+
+            try:
+                from tools.clarify_gateway import mark_awaiting_text
+
+                mark_awaiting_text(self.clarify_id)
+            except Exception:
+                logger.warning(
+                    "Discord clarify multi-select text mode failed (id=%s)",
+                    self.clarify_id,
+                    exc_info=True,
+                )
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+
+            embed = interaction.message.embeds[0] if (
+                interaction.message and interaction.message.embeds
+            ) else None
+            if embed:
+                user = getattr(interaction, "user", None)
+                display_name = getattr(user, "display_name", "user")
+                embed.color = discord.Color.blue()
+                embed.set_footer(
+                    text=f"Awaiting typed response from {display_name}…",
+                )
+
+            try:
+                await interaction.response.edit_message(embed=embed, view=self)
+            except Exception:
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+
+        async def on_timeout(self):
+            await _expire_clarify_view(self, self.clarify_id)
+
 if DISCORD_AVAILABLE:
     _define_discord_view_classes()
 

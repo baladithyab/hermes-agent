@@ -781,6 +781,30 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         if self._http_client is None:
             return SendResult(success=False, error="Not connected")
 
+        # WhatsApp quick replies are single-shot. Multi-select prompts use the
+        # base adapter's numbered-text path, which accepts comma/space lists.
+        _is_multi = False
+        if choices:
+            try:
+                from tools import clarify_gateway as _cg
+
+                with _cg._lock:
+                    _entry = _cg._entries.get(clarify_id)
+                _is_multi = bool(
+                    _entry and getattr(_entry, "multi_select", False)
+                )
+            except Exception:
+                _is_multi = False
+        if _is_multi:
+            return await super().send_clarify(
+                chat_id,
+                question,
+                choices,
+                clarify_id,
+                session_key,
+                metadata,
+            )
+
         question = (question or "").strip()
         reply_to = (metadata or {}).get("reply_to_message_id") if metadata else None
 

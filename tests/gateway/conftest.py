@@ -232,10 +232,21 @@ def _ensure_discord_mock() -> None:
             self.children.clear()
 
     class _FakeSelect:
-        def __init__(self, *, placeholder=None, options=None, custom_id=None, **_):
+        def __init__(
+            self,
+            *,
+            placeholder=None,
+            options=None,
+            custom_id=None,
+            min_values=1,
+            max_values=1,
+            **_,
+        ):
             self.placeholder = placeholder
             self.options = options or []
             self.custom_id = custom_id
+            self.min_values = min_values
+            self.max_values = max_values
             self.callback = None
             self.disabled = False
 
@@ -551,4 +562,3 @@ def pytest_configure(config):
             raise pytest.UsageError(msg)
         else:
             cache_file.write_text("clean", encoding="utf-8")
-
