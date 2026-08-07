@@ -261,9 +261,59 @@ A subagent's background processes are also **killed when the subagent finishes**
 
 A process that finishes while the child is still running needs no handoff: the child reads it (`poll`/`wait`/`log`) and reports it. If the child never reads it, the exit code and output tail are attached to its result as `unread_completions` and shown to the parent. Whatever is still running and was neither killed nor handed off is named on its result (`orphaned_processes`) and in the parent's delegation notice as terminated, so the parent hears from the runtime, never from the child's prose, that "the watcher is running" is no longer true. For CI watchers the better pattern is still: the child returns the fact (PR number, SHA) and the parent launches its own watcher.
 
-## Model Override
+## Per-Task Model and Provider Routing
 
-You can configure a different model for subagents via `config.yaml` — useful for delegating simple tasks to cheaper/faster models:
+Optional top-level `model` and `provider` fields set defaults for a delegation
+call. Each task can override either field independently:
+
+```python
+delegate_task(
+    model="haiku",
+    provider="anthropic",
+    tasks=[
+        {"goal": "List the files touched by this change"},
+        {"goal": "Review the concurrency design", "model": "sonnet"},
+        {
+            "goal": "Give an independent implementation critique",
+            "model": "qwen3.6-plus",
+            "provider": "opencode-go",
+        },
+    ],
+)
+```
+
+Resolution precedence is independent for model and provider:
+
+1. Per-task `tasks[].model` / `tasks[].provider`
+2. Top-level `model` / `provider`
+3. `delegation.model` / `delegation.provider` in `config.yaml`
+4. Parent agent model/provider
+
+Model values use the shared `/model` alias resolver. Inline provider selection is
+also supported when no structured `provider` field applies to that task:
+
+```python
+delegate_task(tasks=[{
+    "goal": "Review the authentication refactor",
+    "model": "sonnet --provider anthropic",
+}])
+```
+
+Prefer the structured `provider` field in JSON tool calls. Combining it with an
+inline `--provider` is an error, even if both name the same provider. This includes
+a top-level provider combined with an inline provider in a task's model string.
+Use a configured provider name; a tool call cannot supply API keys, endpoint URLs,
+or ACP commands.
+
+Each task resolves its own credentials and transport before any child is built.
+A routing error rejects the whole call. Selecting a provider does not reuse the
+parent's endpoint, ACP transport, credential pool, or endpoint-trust capabilities
+for an unrelated route. Pinned children retain the existing delegation fallback
+policy rather than borrowing the parent's fallback chain.
+
+### Configuration Default
+
+You can still configure a default route for subagents via `config.yaml`:
 
 ```yaml
 # In ~/.hermes/config.yaml
@@ -272,7 +322,10 @@ delegation:
   provider: "openrouter"              # Optional: route subagents to a different provider
 ```
 
-If omitted, subagents use the same model as the parent.
+When call-level and per-task overrides are omitted, existing configuration and
+parent inheritance behavior is unchanged. A model-only override retains a
+configured direct endpoint and its request settings; a provider override resolves
+that provider's own credential bundle.
 
 ### Cost strategy: frontier planner, inexpensive workers
 

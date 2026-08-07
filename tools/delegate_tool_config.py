@@ -385,6 +385,11 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
             f"or set delegation.base_url/delegation.api_key for a direct endpoint. "
             f"Available providers: openrouter, nous, zai, kimi-coding, minimax."
         ) from exc
+    return _runtime_credential_bundle(v, runtime, explicit_request_overrides)
+
+def _runtime_credential_bundle(v: dict, runtime: dict, explicit_request_overrides) -> dict:
+    """Apply the same credential/transport preflight to configured and per-call routes."""
+    configured_provider = v["provider"]
 
     api_key = runtime.get("api_key", "")
     if not api_key:
@@ -438,6 +443,137 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             _merge_request_overrides(getattr(parent_agent, "request_overrides", None), explicit_request_overrides),
         )
     return _runtime_provider_credentials(values, explicit_request_overrides)
+
+def _current_delegation_route(parent_agent, base_creds: dict) -> dict:
+    """The switch pipeline's current route, keeping each endpoint paired with its key."""
+    current_provider = (
+        base_creds.get("provider") or getattr(parent_agent, "requested_provider", None)
+        or getattr(parent_agent, "provider", "") or ""
+    )
+    parent_key = getattr(parent_agent, "api_key", None)
+    if base_creds.get("provider") or base_creds.get("base_url"):
+        current_url = base_creds.get("base_url")
+        current_key = base_creds.get("api_key") or parent_key
+    else:
+        current_url, current_key = _inherit_parent_endpoint(
+            parent_agent, getattr(parent_agent, "base_url", None), parent_key,
+        )
+    return {
+        "current_model": base_creds.get("model") or getattr(parent_agent, "model", "") or "",
+        "current_provider": current_provider,
+        "current_base_url": current_url or "",
+        "current_api_key": current_key or "",
+    }
+
+def _resolve_explicit_model_provider_credentials(
+    model: str, provider: str, parent_agent, base_creds: dict, routing_cfg: dict,
+) -> dict:
+    """Resolve an override through /model, then apply delegation's runtime safeguards."""
+    from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
+    from hermes_cli.model_switch import switch_model
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    current = _current_delegation_route(parent_agent, base_creds)
+    full_cfg = load_config_readonly()
+    requested_provider = provider or current["current_provider"]
+    # Here bare "custom" identifies an already selected direct endpoint, not
+    # /model's legacy "first saved custom provider" fallback.
+    keep_direct_endpoint = (
+        requested_provider.strip().lower() == _RUNTIME_PROVIDER_CUSTOM
+        and current["current_provider"] == _RUNTIME_PROVIDER_CUSTOM and current["current_base_url"]
+    )
+    result = switch_model(
+        raw_input=model, **current, is_global=False, explicit_provider=requested_provider,
+        user_providers=full_cfg.get("providers"),
+        custom_providers=[] if keep_direct_endpoint else get_compatible_custom_providers(full_cfg),
+    )
+    if not result.success:
+        raise ValueError(
+            f"Cannot resolve delegation model/provider override {model or provider!r}: "
+            f"{result.error_message or 'unknown error'}"
+        )
+    resolved_model = result.new_model or model
+    resolved_provider = result.target_provider or provider or current["current_provider"]
+    try:
+        runtime = resolve_runtime_provider(
+            requested=resolved_provider, target_model=resolved_model,
+            explicit_api_key=result.api_key or None, explicit_base_url=result.base_url or None,
+        )
+    except Exception as exc:
+        # Unlike a plain model switch, delegation also needs the provider's command/args.
+        # Never turn a failed pinned transport lookup into parent-provider inheritance.
+        raise ValueError(f"Cannot resolve delegation provider '{resolved_provider}': {exc}") from exc
+
+    runtime = {
+        **runtime,
+        "base_url": result.base_url or runtime.get("base_url"),
+        "api_key": result.api_key or runtime.get("api_key"),
+        "api_mode": result.api_mode or runtime.get("api_mode"),
+        "request_overrides": _merge_request_overrides(runtime.get("request_overrides"), result.request_overrides),
+    }
+    if (
+        not provider and base_creds.get("provider") == resolved_provider
+        and _normalized_runtime_url(base_creds.get("base_url")) == _normalized_runtime_url(runtime["base_url"])
+    ):
+        # A model-only override on a configured endpoint retains its explicit dialect
+        # and request settings. base_creds was resolved for this task's model.
+        runtime["api_mode"] = base_creds.get("api_mode") or runtime["api_mode"]
+        runtime["request_overrides"] = _merge_request_overrides(
+            runtime["request_overrides"], base_creds.get("request_overrides"),
+        )
+    return _runtime_credential_bundle(
+        {"model": resolved_model, "provider": resolved_provider}, runtime, routing_cfg.get("request_overrides"),
+    )
+
+def _resolve_call_route(task: dict, top_model: str, top_provider: str, default_model: str, index: int):
+    """An explicit per-task route, or None to preserve the existing config/parent path."""
+    from hermes_cli.model_switch import parse_model_flags_detailed
+
+    model = str(task.get("model") or "").strip() or top_model
+    provider = str(task.get("provider") or "").strip() or top_provider
+    if not model and not provider:
+        return None
+    parsed = parse_model_flags_detailed(model or default_model)
+    if provider and parsed.explicit_provider:
+        raise ValueError(
+            f"Task {index}: Cannot specify both 'provider' parameter and inline '--provider' "
+            "in model string. Use one or the other."
+        )
+    return parsed.model_input or default_model, provider or parsed.explicit_provider
+
+def _resolve_task_credentials(
+    task_list: list[dict[str, Any]], model: Optional[str], provider: Optional[str], routing_cfg: dict, parent_agent,
+) -> tuple[list[dict], dict]:
+    """Task > call > config > parent bundles, plus shared model/provider metadata."""
+    from tools.delegate_tool import _resolve_delegation_credentials
+
+    top_model, top_provider = str(model or "").strip(), str(provider or "").strip()
+    default_model = str(routing_cfg.get("model") or "").strip() or str(getattr(parent_agent, "model", "") or "").strip()
+    inherited_creds = None
+    task_credentials = []
+    for i, task in enumerate(task_list):
+        route = _resolve_call_route(task, top_model, top_provider, default_model, i)
+        if route is None:
+            # Keep the existing no-override path, including None inheritance sentinels.
+            if inherited_creds is None:
+                inherited_creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
+            task_credentials.append(inherited_creds)
+            continue
+        task_model, task_provider = route
+        # An explicit provider owns its whole credential bundle; the lower-precedence
+        # config endpoint/key must not leak onto it (or block it if that route is broken).
+        base_creds = {} if task_provider else _resolve_delegation_credentials(
+            {**routing_cfg, "model": task_model}, parent_agent,
+        )
+        task_credentials.append(_resolve_explicit_model_provider_credentials(
+            task_model, task_provider, parent_agent, base_creds, routing_cfg,
+        ))
+    # Call-wide metadata must not attribute a mixed batch to one child's model/provider.
+    metadata = {
+        key: task_credentials[0][key] if all(c[key] == task_credentials[0][key] for c in task_credentials) else None
+        for key in ("model", "provider")
+    }
+    return task_credentials, metadata
 
 def _load_config() -> dict:
     """The ``delegation`` config section (read-only — do NOT mutate). Prefers the shared ``load_config_readonly()``

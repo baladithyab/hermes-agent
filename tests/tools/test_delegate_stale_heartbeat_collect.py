@@ -28,6 +28,7 @@ class _Child:
         self._delegate_depth = 1
         self._subagent_id = None
         self.session_id = session_id
+        self.model = "test"
         self.release = threading.Event()
         self.interrupted = threading.Event()
 
@@ -133,7 +134,6 @@ def test_async_batch_reports_when_the_last_child_settles_after_its_verdict(monke
             task_list=[{"goal": "late"}, {"goal": "done"}],
             children=[(0, {"goal": "late"}, late), (1, {"goal": "done"}, done)],
             parent_agent=_parent(),
-            creds={"model": "test"},
             context=None,
             top_role="leaf",
             max_children=2,
