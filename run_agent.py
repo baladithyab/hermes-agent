@@ -1341,21 +1341,7 @@ class AIAgent(
             from hermes_cli.mem_trim import trim_memory
             trim_memory(reason="large tool result")
 
-    def _dispatch_delegate_task(self, function_args: dict) -> str:
-        """Single call site for delegate_task dispatch; new DELEGATE_TASK_SCHEMA fields are added only here."""
-        from tools.delegate_tool import _strip_model_hidden_task_fields, delegate_task as _delegate_task
-        # Top-level MODEL delegations run in the background (handle returned, results re-enter as messages),
-        # unless the session's delegate_task is the joined variant (one-shot, delegation.gateway_mode inline).
-        # An ORCHESTRATOR SUBAGENT (depth > 0) stays synchronous — it needs results in-turn and owns no gateway
-        # session. The schema-level `background` param is intentionally ignored.
-        return _delegate_task(
-            goal=function_args.get("goal"), context=function_args.get("context"),
-            tasks=_strip_model_hidden_task_fields(function_args.get("tasks")),
-            max_iterations=function_args.get("max_iterations"), role=function_args.get("role"),
-            background=not (getattr(self, "_delegate_depth", 0) > 0), images=function_args.get("images"),
-            action=function_args.get("action"),
-            subagent_id=function_args.get("subagent_id"), message=function_args.get("message"), parent_agent=self,
-        )
+    _dispatch_delegate_task = _forward("agent.delegation_dispatch", "dispatch_delegate_task")
 
     _invoke_tool = _forward("agent.agent_runtime_helpers", "invoke_tool")
 

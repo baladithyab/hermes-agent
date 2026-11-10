@@ -24,6 +24,7 @@ from agent.delegation_provider import (
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 _PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_RAW_ROUTING_FIELDS = frozenset({"provider", "model", "base_url", "api_key", "api_mode"})
 
 
 @dataclass
@@ -292,8 +293,43 @@ def _undeclared_error(provider: DelegationProvider, index: int, names: list[str]
             f"{listed}; if this session's delegate_task tool offers {listed}, {fix}.")
 
 
+def raw_routing_error(values: Mapping[str, Any], config: Optional[Mapping[str, Any]] = None,
+                      parent_agent: Any = None, *, provider: Optional[DelegationProvider] = None,
+                      index: Optional[int] = None) -> Optional[str]:
+    """Refuse raw routing intent before filtering; null keeps ordinary omitted-field semantics.
+
+    The diagnostic names fields and the active backend's supported task parameters only,
+    never the supplied values (which may be credentials). Schema discovery resolves no keys.
+    """
+    names = sorted(name for name in _RAW_ROUTING_FIELDS if values.get(name) is not None)
+    if not names:
+        return None
+    if config is None:
+        from tools.delegate_tool import _load_config
+        config = _load_config()
+    if provider is None:
+        from agent.delegation_backends import pinned_backend
+        if pinned := pinned_backend(parent_agent):
+            config = {**config, "backend": pinned}
+        try:
+            provider = _active_provider(config)
+        except DelegationRouteError:
+            provider = None
+    parameters = sorted(_declared_parameters(provider, config)) if provider is not None else []
+    location = "delegate_task" if index is None else f"Task {index}"
+    fields = ", ".join(f"'{name}'" for name in names)
+    guidance = (f"Use the active delegation backend '{provider.name}' and its declared per-task parameters: "
+                f"{', '.join(parameters) or '(none)'}." if provider is not None else
+                "Use the active delegation backend's declared per-task parameters.")
+    return (f"{location}: raw routing fields {fields} are unsupported; this request was not started. "
+            f"{guidance} Configure credentials and endpoints in the owning configuration. "
+            "If this session's tool still offers raw routing fields, start a new session with /new.")
+
+
 def _route_one(provider: DelegationProvider, declared: dict[str, dict[str, Any]], index: int,
                task: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
+    if error := raw_routing_error(task, config, provider=provider, index=index):
+        raise DelegationRouteError(error)
     undeclared = sorted(name for name, value in task.items()
                         if value is not None and name not in declared and name not in RESERVED_TASK_PARAMETERS)
     if undeclared:
