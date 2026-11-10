@@ -78,13 +78,17 @@ describe('profile-bound plugin lifecycle', () => {
     expect(requests).toHaveLength(4);
   });
 
-  it('leaves ordinary plugin requests unretargeted', async () => {
+  it('uses the selected default for ordinary requests while preserving explicit profiles', async () => {
     const sdk = window.__HERMES_PLUGIN_SDK__!;
     setManagementProfile('other-home');
     await sdk.fetchJSON('/api/plugins/ordinary/items');
+    setManagementProfile('later-home');
     await sdk.authedFetch('/api/plugins/ordinary/download?profile=original-home');
+    await sdk.authedFetch('/api/plugins/ordinary/download');
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
-      '/api/plugins/ordinary/items', '/api/plugins/ordinary/download?profile=original-home',
+      '/api/plugins/ordinary/items?profile=other-home',
+      '/api/plugins/ordinary/download?profile=original-home',
+      '/api/plugins/ordinary/download?profile=later-home',
     ]);
   });
 });
