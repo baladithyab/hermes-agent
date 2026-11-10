@@ -1,33 +1,42 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createPluginContext } from '@/contrib/plugin'
+import type { HermesApiRequest } from '@/global'
+
+import type { PluginResourceBridgeRequest, PluginResourceBridgeResult } from '../../electron/plugin-resource-contract'
+
 import { setApiRequestBackend, setApiRequestConnection, setApiRequestProfile } from './client'
 import { pluginRest, presentPluginResource } from './plugins'
-import type { HermesApiRequest } from '@/global'
-import type { PluginResourceBridgeRequest, PluginResourceBridgeResult } from '../../electron/plugin-resource-contract'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
+
   return { promise, resolve }
 }
 
 const resource = { documentId: 'cdce3827-ef75-4770-b081-491a58125eb2', grantId: 'G'.repeat(43),
   entryPath: '/v0/resource/plugins/demo/index.html', expiresAt: Date.now() / 1000 + 300 }
+
 const result = { url: 'hermes-plugin-resource://p-' + 'a'.repeat(48) + '/__hermes_plugin_resource__', handleId: 'p-' + 'a'.repeat(48) }
 
 function bridge(open: (request: PluginResourceBridgeRequest) => Promise<PluginResourceBridgeResult>) {
   let epoch = 0
+
   const api = vi.fn(async (request: HermesApiRequest) => {
     if (request.path.includes('/_host/selection') || request.path.includes('/_host/deselection')) {
       epoch += 1
+
       return { scope_id: epoch.toString(16).padStart(32, '0'), epoch }
     }
+
     return { api_version: 1, data: { ok: true } }
   })
+
   const closePluginResource = vi.fn().mockResolvedValue(undefined)
   Object.defineProperty(window, 'hermesDesktop', { configurable: true,
     value: { api, presentPluginResource: open, closePluginResource } })
+
   return { api, closePluginResource }
 }
 
@@ -58,7 +67,11 @@ describe('selection-bound desktop resource presenter', () => {
   it('discards and closes a late main-process response after the selection changed', async () => {
     const opened = deferred<PluginResourceBridgeResult>()
     const started = deferred<void>()
-    const host = bridge(async () => { started.resolve(); return opened.promise })
+
+    const host = bridge(async () => { started.resolve();
+
+ return opened.promise })
+
     setApiRequestConnection('remote-original')
     setApiRequestProfile('alpha')
     const pending = presentPluginResource('resource-late-session', resource)
@@ -74,7 +87,11 @@ describe('selection-bound desktop resource presenter', () => {
   it('closes a presentation that finishes after the owning plugin is disposed', async () => {
     const opened = deferred<PluginResourceBridgeResult>()
     const started = deferred<void>()
-    const host = bridge(async () => { started.resolve(); return opened.promise })
+
+    const host = bridge(async () => { started.resolve();
+
+ return opened.promise })
+
     setApiRequestConnection('remote-plugin')
     setApiRequestProfile('alpha')
     const disposers: Array<() => void> = []

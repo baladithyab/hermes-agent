@@ -77,15 +77,18 @@ export function formatRendererConsoleLine(label: string, details: ConsoleMessage
   if (!isConsoleMessageDetails(details) || details.level !== 'error') {
     return null
   }
+
   // Resource pages are third-party documents, not the trusted renderer. Their
   // console may contain provider secrets even when their own source URL is safe.
-  if (isPluginResourceUrl(details.sourceId)) return null
-  if (/^(?:data:|blob:|about:)/i.test(details.sourceId)) return null
+  if (isPluginResourceUrl(details.sourceId)) {return null}
+
+  if (/^(?:data:|blob:|about:)/i.test(details.sourceId)) {return null}
+
   // sourceId can be forged with //# sourceURL. Electron's frame ancestry is
   // the authority, including about:blank descendants of the resource wrapper.
   try {
     for (let frame = details.frame, depth = 0; frame; frame = frame.parent, depth += 1) {
-      if (depth >= 64 || isPluginResourceUrl(frame.url) || /^(?:data:|blob:|about:)/i.test(frame.url)) return null
+      if (depth >= 64 || isPluginResourceUrl(frame.url) || /^(?:data:|blob:|about:)/i.test(frame.url)) {return null}
     }
   } catch {
     return null // A detached frame must not leak its third-party console.
@@ -106,10 +109,12 @@ export function attachRendererConsoleCapture(win: WindowLike, label: string, log
 
       return
     }
+
     // Persist only an attributable host-frame error. Source URLs can be
     // forged, and opaque guests may omit a usable source URL altogether.
     const mainFrame = win.webContents.mainFrame
-    if (mainFrame && event.frame !== mainFrame) return
+
+    if (mainFrame && event.frame !== mainFrame) {return}
 
     const formatted = formatRendererConsoleLine(label, event)
 

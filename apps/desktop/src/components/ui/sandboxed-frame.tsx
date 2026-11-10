@@ -5,6 +5,7 @@ import { htmlFromDataUrl } from '@/lib/browser-guest-document'
 import { browserBootstrap, endpointUrl } from '@/lib/browser-transport'
 import { isBrowserHostedDesktop } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+
 import { isPluginResourceUrl } from '../../../electron/plugin-resource-contract'
 
 /** The sandbox posture guest content gets by default: scripts run, the frame
@@ -99,18 +100,24 @@ async function verifiedDocumentBytes(document: VerifiedFrameDocument): Promise<U
   ) {
     throw new Error('Invalid verified document')
   }
+
   if (document.html.length > MAX_VERIFIED_DOCUMENT_BYTES) {
     throw new Error('Verified document exceeds 8 MiB')
   }
+
   const bytes = new TextEncoder().encode(document.html)
+
   if (bytes.byteLength > MAX_VERIFIED_DOCUMENT_BYTES) {
     throw new Error('Verified document exceeds 8 MiB')
   }
+
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+
   if (actual !== document.sha256.toLowerCase()) {
     throw new Error('Verified document hash mismatch')
   }
+
   return bytes
 }
 
@@ -132,18 +139,23 @@ function useVerifiedDocumentUrl(
     if (!enabled) {
       return
     }
+
     let disposed = false
     let url: string | undefined
+
     // Copy the primitive fields before the async check. Caller mutation cannot
     // change the bytes between verification and creation of the host-owned URL.
     if (typeof html !== 'string' || typeof sha256 !== 'string') {
       onFailure.current?.(new Error('Invalid verified document'))
+
       return
     }
+
     void verifiedDocumentBytes({ html, sha256 }).then(bytes => {
       if (disposed) {
         return
       }
+
       url = URL.createObjectURL(new Blob([bytes], { type: 'text/html;charset=utf-8' }))
       setVerified({ html, sha256, url })
     }).catch(() => {
@@ -151,8 +163,10 @@ function useVerifiedDocumentUrl(
         onFailure.current?.(new Error('Verified document could not be loaded'))
       }
     })
+
     return () => {
       disposed = true
+
       if (url) {
         URL.revokeObjectURL(url)
       }
@@ -163,8 +177,10 @@ function useVerifiedDocumentUrl(
   // still verifying. A revoked URL must never be mounted a second time.
   if (verified && (!enabled || verified.html !== html || verified.sha256 !== sha256)) {
     setVerified(null)
+
     return undefined
   }
+
   return enabled && verified ? verified.url : undefined
 }
 
@@ -188,6 +204,7 @@ export function SandboxedFrame({
 }: SandboxedFrameProps) {
   const verifiedUrl = useVerifiedDocumentUrl(verifiedDocument, onVerificationError)
   const frameSrc = verifiedDocument !== undefined ? verifiedUrl : src
+
   // The public src path never admits blob URLs, including ones copied from
   // another frame. Only this component's successful verification can mint one.
   if (verifiedDocument !== undefined) {
@@ -196,6 +213,7 @@ export function SandboxedFrame({
     }
   } else if (!hasAllowedScheme(src)) {
     console.warn('[SandboxedFrame] refusing an invalid or oversized frame URL')
+
     return null
   }
 
@@ -407,12 +425,16 @@ function hasAllowedScheme(src: unknown): src is string {
   if (typeof src !== 'string') {
     return false
   }
-  if (isPluginResourceUrl(src)) return true
+
+  if (isPluginResourceUrl(src)) {return true}
+
   try {
     const protocol = new URL(src).protocol
+
     if (protocol === 'data:') {
       return src.length <= MAX_DATA_URL_BYTES && new TextEncoder().encode(src).byteLength <= MAX_DATA_URL_BYTES
     }
+
     return ALLOWED_SRC_SCHEMES.has(protocol)
   } catch {
     return false

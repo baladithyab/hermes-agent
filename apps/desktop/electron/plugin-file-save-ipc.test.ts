@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,6 +15,7 @@ const host = vi.hoisted(() => ({
   showSaveDialog: vi.fn(),
   invoke: vi.fn()
 }))
+
 vi.mock('electron', () => ({
   BrowserWindow: { fromWebContents: host.fromWebContents },
   dialog: { showSaveDialog: host.showSaveDialog },
@@ -25,8 +27,9 @@ vi.mock('electron', () => ({
   webFrame: {}, webUtils: {}
 }))
 
-import { registerPluginFileSaveIpc } from './plugin-file-save-ipc'
 import './preload'
+
+import { registerPluginFileSaveIpc } from './plugin-file-save-ipc'
 
 let directory: string
 let trusted = true
@@ -52,7 +55,9 @@ beforeEach(async () => {
   host.showSaveDialog.mockReset().mockResolvedValue({ canceled: true })
   host.invoke.mockReset().mockImplementation(async (channel: string, request: unknown) => {
     const handler = host.handlers.get(channel)
-    if (!handler) throw new Error('Unknown IPC capability')
+
+    if (!handler) {throw new Error('Unknown IPC capability')}
+
     return handler(host.event, request)
   })
   registerPluginFileSaveIpc({ isTrustedWindow: () => trusted, rendererUrl: () => 'file:///app/dist/index.html' })
@@ -72,11 +77,15 @@ describe('plugin Save capability across preload and main', () => {
   })
 
   it.each(['subframe', 'guest-window', 'wrong-document', 'destroyed', 'no-window'])('refuses %s before native UI', async kind => {
-    if (kind === 'subframe') host.event = { ...host.event, senderFrame: { url: mainFrame.url } } as IpcMainInvokeEvent
-    if (kind === 'guest-window') trusted = false
-    if (kind === 'wrong-document') mainFrame.url = 'file:///tmp/guest.html'
-    if (kind === 'destroyed') destroyed = true
-    if (kind === 'no-window') host.fromWebContents.mockReturnValue(null)
+    if (kind === 'subframe') {host.event = { ...host.event, senderFrame: { url: mainFrame.url } } as IpcMainInvokeEvent}
+
+    if (kind === 'guest-window') {trusted = false}
+
+    if (kind === 'wrong-document') {mainFrame.url = 'file:///tmp/guest.html'}
+
+    if (kind === 'destroyed') {destroyed = true}
+
+    if (kind === 'no-window') {host.fromWebContents.mockReturnValue(null)}
     await expect(bridge.savePluginFile({ suggestedFilename: 'export.json', bytes: new ArrayBuffer(0) })).rejects.toThrow('not authorized')
     expect(host.showSaveDialog).not.toHaveBeenCalled()
     expect(await readdir(directory)).toEqual([])
@@ -85,6 +94,7 @@ describe('plugin Save capability across preload and main', () => {
   it('checks the sender again after native consent', async () => {
     host.showSaveDialog.mockImplementation(async () => {
       mainFrame.url = 'https://guest.example.test/'
+
       return { canceled: false, filePath: path.join(directory, 'not-written.json') }
     })
     await expect(bridge.savePluginFile({ suggestedFilename: 'export.json', bytes: new ArrayBuffer(1) })).rejects.toThrow('no longer authorized')

@@ -14,9 +14,9 @@
 
 import type { ReadableAtom } from 'nanostores'
 
-import { presentPluginResource } from '@/api/plugins'
 import { createPluginSession } from '@/api/plugin-session'
 import type { PluginSession } from '@/api/plugin-session'
+import { presentPluginResource } from '@/api/plugins'
 import { pluginRest, type PluginRestOptions, pluginSocket } from '@/hermes'
 import { createPluginI18n, type PluginI18n } from '@/i18n'
 import {
@@ -32,7 +32,8 @@ import { $petActive } from '@/store/pet'
 import { clearPetMessages, type PetSayOptions, sayPetMessage } from '@/store/pet-plugin-messages'
 
 import { parsePluginFileSaveRequest, type PluginFileSaveRequest, type PluginFileSaveResult } from '../../electron/plugin-file-save-contract'
-import type { PluginResourceRequest, PluginResourcePresentation } from '../../electron/plugin-resource-contract'
+import type { PluginResourcePresentation, PluginResourceRequest } from '../../electron/plugin-resource-contract'
+
 import { type GatewayEventListener, onGatewayEvent } from './events'
 import { createPluginFiles, type PluginFiles } from './plugin-files'
 import { createPluginPreview, type PluginPreview } from './plugin-preview'
@@ -40,14 +41,14 @@ import { $pluginRecords } from './plugins-store'
 import { registry } from './registry'
 import { type PluginSettingsPage, settingsPageContribution } from './settings-pages'
 
+export type { PluginFileSaveRequest, PluginFileSaveResult } from '../../electron/plugin-file-save-contract'
+export type { PluginResourcePresentation, PluginResourceRequest } from '../../electron/plugin-resource-contract'
 export type { PluginFileEntry, PluginFiles, PluginFilesResult, PluginFolder } from './plugin-files'
 export type { PluginPreview } from './plugin-preview'
-export type { PluginSession, PluginSessionOptions } from '@/api/plugin-session'
-export type { PluginFileSaveRequest, PluginFileSaveResult } from '../../electron/plugin-file-save-contract'
-export type { PluginResourceRequest, PluginResourcePresentation } from '../../electron/plugin-resource-contract'
+export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'
 import type { Contribution } from './types'
 
-export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'
+export type { PluginSession, PluginSessionOptions } from '@/api/plugin-session'
 export type { PluginRestOptions } from '@/hermes'
 export type { HermesOpenTarget } from '@/lib/hermes-open-target'
 export type { PluginAppActionId, PluginAppActionInfo, PluginRunActionResult } from '@/lib/keybinds/plugin-actions'
@@ -286,28 +287,38 @@ function createPluginOs(pluginId: string, track: (dispose: () => void) => () => 
   const resources = new Set<() => Promise<void>>()
   let tracked = false
   let disposed = false
+
   return {
     ...(saveFile ? {
       saveFile: async (request: PluginFileSaveRequest) => saveFile(parsePluginFileSaveRequest(request))
     } : {}),
     ...(resourceSupported ? {
       presentPluginResource: async (request: PluginResourceRequest): Promise<PluginResourcePresentation> => {
-        if (disposed) throw new Error('RESOURCE_REVOKED')
+        if (disposed) {throw new Error('RESOURCE_REVOKED')}
+
         if (!tracked) {
           tracked = true
           track(() => {
             disposed = true
-            for (const close of resources) void close().catch(() => undefined)
+
+            for (const close of resources) {void close().catch(() => undefined)}
             resources.clear()
           })
         }
+
         const resource = await presentPluginResource(pluginId, request)
+
         if (disposed) {
           await resource.close().catch(() => undefined)
           throw new Error('RESOURCE_REVOKED')
         }
-        const close = () => { resources.delete(close); return resource.close() }
+
+        const close = () => { resources.delete(close);
+
+ return resource.close() }
+
         resources.add(close)
+
         return { url: resource.url, close }
       }
     } : {}),
@@ -441,6 +452,7 @@ export function createPluginContext(
     createPluginSession: () => {
       const session = createPluginSession(pluginId)
       track(() => { void session.close().catch(() => undefined) })
+
       return session
     },
     socket: (path, onMessage) => track(pluginSocket(pluginId, path, onMessage)),

@@ -27,6 +27,7 @@ export interface PluginResourceBridgeResult { url: string; handleId: string }
 export function isPluginResourceUrl(source: string): boolean {
   try {
     const url = new URL(source)
+
     return url.protocol === `${PLUGIN_RESOURCE_SCHEME}:` && /^p-[a-f0-9]{48}$/.test(url.hostname) &&
       !url.port && !url.username && !url.password
   } catch { return false }

@@ -2,6 +2,7 @@
 import { Blob as NodeBlob } from 'node:buffer'
 import { createHash, webcrypto } from 'node:crypto'
 import { TextEncoder as NodeTextEncoder } from 'node:util'
+
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,6 +11,7 @@ import { MAX_VERIFIED_DOCUMENT_BYTES, SandboxedFrame } from './sandboxed-frame'
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
+
   return { promise, resolve }
 }
 
@@ -46,8 +48,10 @@ describe('verified document sandbox', () => {
     vi.stubGlobal('__HERMES_BASE_PATH__', '/hermes')
     vi.stubGlobal('__HERMES_UI_SURFACE__', 'webapp')
     const document = documentFor('<p>Verified browser guest</p>')
-    const { container } = render(<SandboxedFrame title="Verified browser" verifiedDocument={document}
-      sandbox="allow-scripts allow-same-origin allow-popups" />)
+
+    const { container } = render(<SandboxedFrame sandbox="allow-scripts allow-same-origin allow-popups" title="Verified browser"
+      verifiedDocument={document} />)
+
     await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     const frame = container.querySelector('iframe')!
     expect(frame.getAttribute('src')).toContain('/hermes/assets/webapp-guest.html')
@@ -61,10 +65,12 @@ describe('verified document sandbox', () => {
     const document = documentFor('<!doctype html><p>日本語</p>')
     const digest = deferred<ArrayBuffer>()
     vi.stubGlobal('crypto', { subtle: { digest: () => digest.promise } })
+
     const { container, unmount } = render(<SandboxedFrame
-      title="Verified console" verifiedDocument={document}
-      sandbox="ALLOW-SAME-ORIGIN allow-scripts allow-popups allow-top-navigation"
+      sandbox="ALLOW-SAME-ORIGIN allow-scripts allow-popups allow-top-navigation" title="Verified console"
+      verifiedDocument={document}
     />)
+
     expect(SandboxedFrame.supportsVerifiedDocument).toBe(true)
     expect(container.querySelector('iframe')).toBeNull()
     expect(created).not.toHaveBeenCalled()
@@ -92,9 +98,11 @@ describe('verified document sandbox', () => {
     { html: 'é'.repeat(MAX_VERIFIED_DOCUMENT_BYTES / 2 + 1), sha256: '0'.repeat(64) }
   ])('rejects malformed, mismatched and oversized documents without allocating a URL (%#)', async document => {
     const failed = vi.fn()
+
     const { container } = render(<SandboxedFrame
-      title="Rejected" verifiedDocument={document as never} onVerificationError={failed}
+      onVerificationError={failed} title="Rejected" verifiedDocument={document as never}
     />)
+
     await waitFor(() => expect(failed).toHaveBeenCalledTimes(1))
     expect(container.querySelector('iframe')).toBeNull()
     expect(created).not.toHaveBeenCalled()
@@ -105,10 +113,10 @@ describe('verified document sandbox', () => {
     const { container, rerender } = render(<SandboxedFrame title="Large" verifiedDocument={document} />)
     await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     expect(created.mock.calls[0][0].size).toBe(MAX_VERIFIED_DOCUMENT_BYTES)
-    rerender(<SandboxedFrame title="Ordinary" src={`data:text/html,${'x'.repeat(2 * 1024 * 1024)}`} />)
+    rerender(<SandboxedFrame src={`data:text/html,${'x'.repeat(2 * 1024 * 1024)}`} title="Ordinary" />)
     expect(container.querySelector('iframe')).toBeNull()
     expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:https://host.test/1')
-    rerender(<SandboxedFrame title="Ordinary" src="data:text/html,<p>small</p>" />)
+    rerender(<SandboxedFrame src="data:text/html,<p>small</p>" title="Ordinary" />)
     expect(container.querySelector('iframe')?.getAttribute('src')).toBe('data:text/html,<p>small</p>')
   })
 
@@ -163,18 +171,22 @@ describe('verified document sandbox', () => {
 describe('host-owned resource presentation frames', () => {
   it('accepts only capability-shaped custom origins and retains the opaque sandbox', () => {
     const src = 'hermes-plugin-resource://p-' + 'a'.repeat(48) + '/__hermes_plugin_resource__'
-    const { container, rerender } = render(<SandboxedFrame title="Resource" src={src}
-      sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-top-navigation" />)
+
+    const { container, rerender } = render(<SandboxedFrame sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-top-navigation" src={src}
+      title="Resource" />)
+
     expect(SandboxedFrame.supportsPluginResources).toBe(true)
     const frame = container.querySelector('iframe')!
     expect(frame.getAttribute('src')).toBe(src)
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-forms')
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer')
+
     for (const invalid of ['hermes-plugin-resource://arbitrary/private', 'hermes-plugin-resource://user@p-' + 'a'.repeat(48) + '/x',
       'blob:https://host.test/caller-owned']) {
-      rerender(<SandboxedFrame title="Rejected" src={invalid} />)
+      rerender(<SandboxedFrame src={invalid} title="Rejected" />)
       expect(container.querySelector('iframe')).toBeNull()
     }
+
     expect(created).not.toHaveBeenCalled()
   })
 })

@@ -2430,54 +2430,7 @@ def cmd_update(args):
 
 
 
-def _coalesce_session_name_args(argv: list, raw_commands=()) -> list:
-    """Join unquoted multi-word session names after -c/--continue and -r/--resume.
-
-    ``hermes -c Pokemon Agent Dev`` → ``['-c', 'Pokemon Agent Dev']``; tokens
-    are collected until the next flag (``-*``) or known top-level subcommand.
-    """
-    _SUBCOMMANDS = {
-        "chat", "model", "gateway", "setup", "whatsapp", "whatsapp-cloud", "login", "logout",
-        "auth", "status", "cron", "doctor", "config", "pairing", "skills", "tools", "mcp",
-        "sessions", "insights", "update", "uninstall", "profile", "dashboard", "serve", "webapp",
-        "desktop", "gui", "honcho", "claw", "plugins", "security", "acp", "webhook", "peer",
-        "memory", "dump", "debug", "backup", "import", "completion", "logs", "usage",
-    }
-    _SUBCOMMANDS.update(raw_commands)
-    _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
-    from hermes_cli._parser import top_level_value_flag_sets
-    required_values, optional_values = top_level_value_flag_sets()
-    value_flags = (required_values | optional_values) - _SESSION_FLAGS
-
-    result = []
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token in value_flags and i + 1 < len(argv):
-            result.extend(argv[i:i + 2])
-            i += 2
-            continue
-        if token in raw_commands:
-            result.extend(argv[i:])
-            break
-        if token in _SESSION_FLAGS:
-            result.append(token)
-            i += 1
-            # Collect subsequent non-flag, non-subcommand tokens as one name
-            parts: list = []
-            while (
-                i < len(argv)
-                and not argv[i].startswith("-")
-                and argv[i] not in _SUBCOMMANDS
-            ):
-                parts.append(argv[i])
-                i += 1
-            if parts:
-                result.append(" ".join(parts))
-        else:
-            result.append(token)
-            i += 1
-    return result
+from hermes_cli.main_resume_args import coalesce_session_name_args
 
 
 from hermes_cli.profile_cmd import cmd_profile
@@ -3103,7 +3056,7 @@ def _try_fast_chat_launch() -> bool:
 
     parser = _light_chat_parser()
     try:
-        args, unknown = parser.parse_known_args(_coalesce_session_name_args(argv))
+        args, unknown = parser.parse_known_args(coalesce_session_name_args(argv))
     except SystemExit:
         return False
     if unknown:  # plugin subcommand or full-parser-only flag → full dispatch
@@ -3153,7 +3106,7 @@ def _try_termux_fast_cli_launch() -> bool:
         return False
 
     parser = _light_chat_parser()
-    args = parser.parse_args(_coalesce_session_name_args(argv))
+    args = parser.parse_args(coalesce_session_name_args(argv))
     _enable_cpu_profile(args)  # before any branch: the interactive one defers agent startup
 
     if getattr(args, "version", False):
@@ -3203,7 +3156,7 @@ def _try_termux_fast_tui_launch() -> bool:
         return False
 
     parser = _light_chat_parser()
-    args = parser.parse_args(_coalesce_session_name_args(sys.argv[1:]))
+    args = parser.parse_args(coalesce_session_name_args(sys.argv[1:]))
 
     # Preserve top-level behaviours whose semantics are not "launch chat/TUI".
     if getattr(args, "version", False) or getattr(args, "oneshot", None):
@@ -3404,7 +3357,7 @@ def _parse_cli_args(parser, subparsers, argv):
 
     _raw_commands = {name for name, command in getattr(subparsers, "choices", {}).items()
                      if getattr(command, "_hermes_raw_argv", False)}
-    _processed_argv = _coalesce_session_name_args(argv, _raw_commands)
+    _processed_argv = coalesce_session_name_args(argv, _raw_commands)
     _known_cmds = (
         set(subparsers.choices.keys()) if hasattr(subparsers, "choices") else set()
     )

@@ -43,7 +43,7 @@ class NativeCliPump:
             self.running = True
             try:
                 future.set_result(context.run(callback))
-            except BaseException as exc:
+            except BaseException as exc:  # health: allow BLE001 -- propagate the original native CLI exception through the waiting Future
                 future.set_exception(exc)
             finally:
                 self.running = False

@@ -4,14 +4,16 @@ import type { HermesConnection } from '@/global'
 import { hostHas } from '@/lib/host-capabilities'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 
+import type { PluginResourcePresentation, PluginResourceRequest } from '../../electron/plugin-resource-contract'
+
 import { $apiBackendRevision, $apiRequestScope, getApiRequestConnection, getApiRequestProfile, hermesApi, hermesApiAs, profileScoped } from './client'
 import { PluginSelectionSession, type SelectionOwner } from './plugin-selection-session'
-import type { PluginResourceRequest, PluginResourcePresentation } from '../../electron/plugin-resource-contract'
 
 const selectionSessions = new Map<string, PluginSelectionSession>()
 
 function selectionSession(pluginId: string): PluginSelectionSession {
   let session = selectionSessions.get(pluginId)
+
   if (!session) {
     session = new PluginSelectionSession((owner, action, token) => hermesApiAs(owner, {
       path: `/api/plugins/${pluginId}/_host/${action}`,
@@ -23,6 +25,7 @@ function selectionSession(pluginId: string): PluginSelectionSession {
     const bound = session
     $apiRequestScope.subscribe((owner: SelectionOwner) => bound.change(owner))
   }
+
   return session
 }
 
@@ -30,32 +33,40 @@ function selectionSession(pluginId: string): PluginSelectionSession {
  * cannot select a connection or look up the active profile later. */
 export async function presentPluginResource(pluginId: string, request: PluginResourceRequest): Promise<PluginResourcePresentation> {
   const bridge = window.hermesDesktop
-  if (!bridge?.presentPluginResource || !bridge.closePluginResource) throw new Error('RESOURCE_UNSUPPORTED')
+
+  if (!bridge?.presentPluginResource || !bridge.closePluginResource) {throw new Error('RESOURCE_UNSUPPORTED')}
   const session = selectionSession(pluginId)
   const backendRevision = $apiBackendRevision.get()
   const lease = await session.acquire()
-  if (!session.current(lease) || backendRevision !== $apiBackendRevision.get()) throw new Error('STALE_SCOPE')
+
+  if (!session.current(lease) || backendRevision !== $apiBackendRevision.get()) {throw new Error('STALE_SCOPE')}
   const result = await bridge.presentPluginResource({ ...request, pluginId, owner: { ...lease.owner }, selection: { ...lease.token } })
   let pending: Promise<void> | undefined
   let unsubscribe: (() => void) | undefined
   let unsubscribeBackend: (() => void) | undefined
+
   const close = (): Promise<void> => {
     unsubscribe?.()
     unsubscribeBackend?.()
     pending ??= bridge.closePluginResource!(result.handleId)
+
     return pending
   }
+
   if (!session.current(lease) || backendRevision !== $apiBackendRevision.get()) {
     await close().catch(() => undefined)
     throw new Error('STALE_SCOPE')
   }
+
   unsubscribe = $apiRequestScope.subscribe(() => {
-    if (!session.current(lease)) void close().catch(() => undefined)
+    if (!session.current(lease)) {void close().catch(() => undefined)}
   })
   unsubscribeBackend = $apiBackendRevision.subscribe(() => {
-    if (backendRevision !== $apiBackendRevision.get()) void close().catch(() => undefined)
+    if (backendRevision !== $apiBackendRevision.get()) {void close().catch(() => undefined)}
   })
+
   if (pending) { unsubscribe(); unsubscribeBackend() }
+
   return { url: result.url, close }
 }
 
@@ -133,9 +144,11 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
   }
 
   const suffix = pluginPathSuffix('pluginRest', path)
+
   if (opts.selectionBound) {
     const session = selectionSession(pluginId)
     const lease = await session.acquire()
+
     const result = await hermesApiAs<T>(lease.owner, {
       path: `/api/plugins/${pluginId}${suffix}`,
       method: opts.method,
@@ -144,7 +157,9 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
       timeoutMs: opts.timeoutMs,
       pluginSelection: lease.token
     })
-    if (!session.current(lease)) throw new Error('STALE_SCOPE')
+
+    if (!session.current(lease)) {throw new Error('STALE_SCOPE')}
+
     return result
   }
 

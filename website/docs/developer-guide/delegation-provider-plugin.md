@@ -112,6 +112,17 @@ A route is a dict with any of:
   same gates as `/fast` (and, for `ultrafast`, the signed-in Codex account's catalog). A tier the
   route does not offer refuses the task; otherwise it applies to that child only and is re-applied
   after the child is built, so a custom provider's `extra_body` cannot restore another tier.
+- `model_selection`: `true` asks core to run the canonical CLI model selector for the route's
+  named `provider` and `model`. It validates and normalizes the selection in the owning profile,
+  retaining alias endpoints, API mode, request settings and the original callable credential
+  source. Do not combine it with `base_url`, `api_key`, `api_mode` or `request_overrides`;
+  configure those on the owning provider or model alias. This executes only at dispatch;
+  schema construction remains credential and network free. The backend receives no resolved
+  credentials, including when it runs in a plugin host. Other backends retain their existing
+  route-resolution behavior unless they request this option.
+  A descriptor `{"allowed": [{"provider": "...", "model": "..."}]}` additionally checks
+  the final canonical pair against the exact list, after alias expansion. An empty list
+  denies all selections; malformed policies refuse the task.
 - `profile`: the name of a Hermes profile. The child runs **as that profile**: its `config.yaml`,
   primary model and credentials (a `model.default` alias or named provider resolves exactly as at
   CLI startup), credential pool, fallback chain, reasoning (`agent.reasoning_effort` and

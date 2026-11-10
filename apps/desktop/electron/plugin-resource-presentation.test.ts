@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import {
   brotliCompressSync, constants, deflateRawSync, deflateSync, gzip, gzipSync, zstdCompress, zstdCompressSync
 } from 'node:zlib'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { MAX_PLUGIN_RESOURCE_BODY, PLUGIN_RESOURCE_WRAPPER_PATH, redactPluginResourceUrls } from './plugin-resource-contract'
@@ -14,19 +15,23 @@ import { formatRendererConsoleLine } from './renderer-log'
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
+
   return { promise, resolve }
 }
 
 const entry = '/v0/resource/plugins/demo/index.html'
+
 const request = (): PluginResourceBridgeRequest => ({
   pluginId: 'hermes-cpa', documentId: 'cdce3827-ef75-4770-b081-491a58125eb2', grantId: 'G'.repeat(43),
   entryPath: entry, expiresAt: Date.now() / 1000 + 300,
   owner: { connectionId: 'captured-remote', profile: 'alpha' },
   selection: { client: 'client-with-sixteen-characters', scope: 'a'.repeat(32), epoch: 1 }
 })
+
 const native = (body: Buffer = Buffer.from('<script type="module" src="./module.js"></script>'), headers: [string, string][] = []) => ({
   api_version: 1, data: { ok: true, status: 200, headers: [['content-type', 'text/html'], ...headers], body_base64: body.toString('base64') }
 })
+
 const origin = (url: string): string => url.slice(0, url.indexOf(PLUGIN_RESOURCE_WRAPPER_PATH))
 const compressGzip = promisify(gzip)
 const compressZstd = promisify(zstdCompress)
@@ -56,9 +61,11 @@ describe('isolated native resource protocol', () => {
     const bytes = Buffer.from([0, 255, 17, 28])
     const invoke = vi.fn().mockResolvedValue(native(bytes, [['Set-Cookie', 'SECRET'], ['Authorization', 'SECRET']]))
     const opened = store.open(request(), 7, invoke, () => true)
+
     const response = await store.handle(new Request(`${origin(opened.url)}/v0/resource/plugins/demo/%E4%B8%AD%20%252e.js?profile=other&code=secret&x=&x=2`, {
       headers: { Authorization: 'Bearer GUEST', Cookie: 'GUEST', Accept: 'application/javascript', 'X-Hermes-Session-Token': 'GUEST' }
     }))
+
     expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes)
     expect(invoke).toHaveBeenCalledExactlyOnceWith({ document_id: request().documentId, grant_id: request().grantId,
       path: '/v0/resource/plugins/demo/中 %2e.js', query: [['profile', 'other'], ['code', 'secret'], ['x', ''], ['x', '2']], accept: 'application/javascript' }, false)
@@ -73,13 +80,17 @@ describe('isolated native resource protocol', () => {
     const store = new PluginResourcePresentations()
     const invoke = vi.fn()
     const opened = store.open(request(), 7, invoke, () => true)
+
     for (const path of ['/api/config', '/login', '/v0/resource/plugins/other/index.html']) {
       expect((await store.handle(new Request(origin(opened.url) + path))).status).toBe(410)
     }
+
     expect((await store.handle(new Request('hermes-plugin-resource://p-' + 'b'.repeat(48) + entry))).status).toBe(410)
+
     for (const method of ['HEAD', 'POST', 'PUT', 'DELETE']) {
       expect((await store.handle(new Request(origin(opened.url) + entry, { method }))).status).toBe(405)
     }
+
     expect((await store.handle(new Request(origin(opened.url) + entry, { method: 'OPTIONS' }))).status).toBe(204)
     expect(invoke).not.toHaveBeenCalled()
   })
@@ -88,7 +99,11 @@ describe('isolated native resource protocol', () => {
     const store = new PluginResourcePresentations()
     const gate = deferred<unknown>()
     const started = deferred<void>()
-    const invoke = vi.fn(async (_body, close) => { if (close) return {}; started.resolve(); return gate.promise })
+
+    const invoke = vi.fn(async (_body, close) => { if (close) {return {};} started.resolve();
+
+ return gate.promise })
+
     const opened = store.open(request(), 7, invoke, () => true)
     await expect(store.close(opened.handleId, 8)).rejects.toThrow('RESOURCE_REVOKED')
     const pending = store.handle(new Request(origin(opened.url) + entry))
@@ -128,7 +143,11 @@ describe('isolated native resource protocol', () => {
     const store = new PluginResourcePresentations()
     const gate = deferred<unknown>()
     const started = deferred<void>()
-    const invoke = vi.fn(() => { started.resolve(); return gate.promise })
+
+    const invoke = vi.fn(() => { started.resolve();
+
+ return gate.promise })
+
     let current = true
     const opened = store.open(request(), 7, invoke, () => current)
     const requests = Array.from({ length: 16 }, () => store.handle(new Request(origin(opened.url) + entry)))
@@ -145,11 +164,14 @@ describe('isolated native resource protocol', () => {
     const store = new PluginResourcePresentations()
     const gate = deferred<unknown>()
     const started = deferred<void>()
+
     const invoke = vi.fn(async (_body, close) => {
-      if (close) return {}
+      if (close) {return {}}
       started.resolve()
+
       return gate.promise
     })
+
     const opened = store.open(request(), 7, invoke, () => true)
     const first = store.handle(new Request(origin(opened.url) + entry))
     await started.promise
@@ -176,10 +198,12 @@ describe('isolated native resource protocol', () => {
   it('rejects reserved paths and caller-selected authorities while accepting skewed owner clocks', () => {
     expect(() => parseResourceBridgeRequest({ ...request(), entryPath: PLUGIN_RESOURCE_WRAPPER_PATH })).toThrow()
     expect(() => parseResourceBridgeRequest({ ...request(), entryPath: 'https://evil.test/' })).toThrow()
+
     for (const expiresAt of [1, Date.now() / 1000 + 3600.25]) {
       expect(parseResourceBridgeRequest({ ...request(), expiresAt }).expiresAt).toBe(expiresAt)
     }
-    for (const expiresAt of [0, -1, NaN, Infinity]) expect(() => parseResourceBridgeRequest({ ...request(), expiresAt })).toThrow()
+
+    for (const expiresAt of [0, -1, NaN, Infinity]) {expect(() => parseResourceBridgeRequest({ ...request(), expiresAt })).toThrow()}
     expect(() => parseResourceBridgeRequest({ ...request(), selection: { client: 'forged', epoch: 1 } })).toThrow()
   })
 })
@@ -239,9 +263,11 @@ describe('native content decoding', () => {
       ['application/json', '{"gzip":true,"generation":"1"}']
     ]) {
       const body = Buffer.from(content)
+
       const response = await resourceResponse(native(compress(body), [
         ['Content-Type', contentType], ['Content-Encoding', encoding], ['Content-Length', '1']
       ]), resourceOrigin, entry)
+
       expect(response.headers.get('Content-Encoding')).toBeNull()
       expect(response.headers.get('Content-Length')).toBe(String(body.length))
       expect(response.headers.get('Content-Type')).toBe(contentType)
@@ -251,6 +277,7 @@ describe('native content decoding', () => {
 
   it('decodes stacked/repeated encodings in reverse order and concatenated gzip members', async () => {
     const content = Buffer.from('{"generation":"1","gzip":true}')
+
     for (const headers of [
       [['Content-Encoding', ' GZip , br ']],
       [['Content-Encoding', 'gzip'], ['content-encoding', 'br']]
@@ -258,6 +285,7 @@ describe('native content decoding', () => {
       const response = await resourceResponse(native(brotliCompressSync(gzipSync(content)), headers), resourceOrigin, entry)
       expect(Buffer.from(await response.arrayBuffer())).toEqual(content)
     }
+
     const concatenated = Buffer.concat([gzipSync(content.subarray(0, 8)), gzipSync(content.subarray(8))])
     const response = await resourceResponse(native(concatenated, [['Content-Encoding', 'gzip']]), resourceOrigin, entry)
     expect(await response.json()).toEqual({ generation: '1', gzip: true })
@@ -282,13 +310,16 @@ describe('native content decoding', () => {
   it('decodes zstd frames and raw deflate inside stacked codings', async () => {
     const content = Buffer.from('{"native":"decoded","binary":"\\u0000"}')
     const skippable = Buffer.from([0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0, 1, 2, 3])
+
     const frames = Buffer.concat([
       skippable, zstdCompressSync(content.subarray(0, 8)), skippable, zstdCompressSync(content.subarray(8)), skippable
     ])
+
     // Split the next frame's magic across the outer codec's output chunks.
     const boundarySkip = Buffer.alloc(16 * 1024 - 2)
     boundarySkip.writeUInt32LE(0x184d2a50, 0)
     boundarySkip.writeUInt32LE(boundarySkip.length - 8, 4)
+
     for (const [body, encoding] of [
       [frames, 'zstd'],
       [brotliCompressSync(frames), 'zstd, br'],
@@ -307,7 +338,8 @@ describe('native content decoding', () => {
         const redirect = status >= 300 && status !== 304
         const location = '/v0/resource/plugins/demo/next?x=1&x=2#tab'
         const headers: [string, string][] = [['Content-Encoding', encoding]]
-        if (redirect) headers.push(['Location', location])
+
+        if (redirect) {headers.push(['Location', location])}
         const envelope = native(Buffer.alloc(0), headers)
         envelope.data.status = status
         const response = await resourceResponse(envelope, resourceOrigin, entry)
@@ -317,10 +349,12 @@ describe('native content decoding', () => {
         expect(response.headers.get('Location')).toBe(redirect ? location : null)
         expect(await response.text()).toBe('')
       }
+
       // An outer coding can also produce an empty body for the next layer.
       const nested = await resourceResponse(native(gzipSync(Buffer.alloc(0)), [
         ['Content-Encoding', `${encoding}, gzip`]
       ]), resourceOrigin, entry)
+
       expect(await nested.text()).toBe('')
     }
   )
@@ -332,18 +366,23 @@ describe('native content decoding', () => {
       const frame = Buffer.concat([
         Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, window, 0x29, 0, 0]), Buffer.from('plain')
       ])
+
       const decoding = resourceResponse(native(frame, [['Content-Encoding', 'zstd']]), resourceOrigin, entry)
-      if (window === 0x68) expect(await (await decoding).text()).toBe('plain')
-      else await expect(decoding).rejects.toThrow('RESOURCE_RESPONSE_INVALID')
+
+      if (window === 0x68) {expect(await (await decoding).text()).toBe('plain')}
+      else {await expect(decoding).rejects.toThrow('RESOURCE_RESPONSE_INVALID')}
     }
+
     for (const window of [24, 25]) {
       const body = brotliCompressSync(Buffer.from('plain'), { params: {
         [constants.BROTLI_PARAM_LGWIN]: window,
         [constants.BROTLI_PARAM_LARGE_WINDOW]: window > 24 ? 1 : 0
       } })
+
       const decoding = resourceResponse(native(body, [['Content-Encoding', 'br']]), resourceOrigin, entry)
-      if (window === 24) expect(await (await decoding).text()).toBe('plain')
-      else await expect(decoding).rejects.toThrow('RESOURCE_RESPONSE_INVALID')
+
+      if (window === 24) {expect(await (await decoding).text()).toBe('plain')}
+      else {await expect(decoding).rejects.toThrow('RESOURCE_RESPONSE_INVALID')}
     }
   })
 
@@ -355,7 +394,9 @@ describe('native content decoding', () => {
     const corruptDeflate = deflateSync(content)
     corruptDeflate[corruptDeflate.length - 1] ^= 255
     const bodies: [Buffer, string][] = [[corruptZstd, 'zstd'], [corruptDeflate, 'deflate']]
-    for (let end = 1; end < checkedZstd.length; end++) bodies.push([checkedZstd.subarray(0, end), 'zstd'])
+
+    for (let end = 1; end < checkedZstd.length; end++) {bodies.push([checkedZstd.subarray(0, end), 'zstd'])}
+
     for (const [body, encoding] of [
       [gzipSync(content), 'gzip'], [deflateSync(content), 'deflate'],
       [deflateRawSync(content), 'deflate'], [brotliCompressSync(content), 'br'],
@@ -363,9 +404,11 @@ describe('native content decoding', () => {
     ] satisfies [Buffer, string][]) {
       bodies.push([body.subarray(0, -1), encoding], [Buffer.concat([body, Buffer.from([255])]), encoding])
     }
+
     const incompleteSkip = Buffer.from([0x50, 0x2a, 0x4d, 0x18, 2, 0, 0, 0, 1])
     bodies.push([Buffer.concat([checkedZstd, incompleteSkip]), 'zstd'])
     bodies.push([Buffer.concat([checkedZstd, checkedZstd.subarray(0, -1)]), 'zstd'])
+
     for (const [body, encoding] of bodies) {
       await expect(resourceResponse(native(body, [['Content-Encoding', encoding]]), resourceOrigin, entry))
         .rejects.toThrow('RESOURCE_RESPONSE_INVALID')
@@ -377,6 +420,7 @@ describe('native content decoding', () => {
     const corrupt = Buffer.from(compressed)
     corrupt[corrupt.length - 8] ^= 255
     const oversized = await compressGzip(Buffer.alloc(MAX_PLUGIN_RESOURCE_BODY + 1))
+
     for (const [body, encoding] of [
       [compressed, 'compress'], [compressed, 'constructor'], [compressed, 'gzip, unknown'],
       [compressed, 'gzip,'], [compressed.subarray(0, -1), 'gzip'], [corrupt, 'gzip'],
@@ -403,6 +447,7 @@ describe('native content decoding', () => {
     const exact = await resourceResponse(native(await compress(Buffer.alloc(MAX_PLUGIN_RESOURCE_BODY, 65)), [
       ['Content-Encoding', encoding]
     ]), resourceOrigin, entry)
+
     expect((await exact.arrayBuffer()).byteLength).toBe(MAX_PLUGIN_RESOURCE_BODY)
     await expect(resourceResponse(native(await compress(Buffer.alloc(MAX_PLUGIN_RESOURCE_BODY + 1, 65)), [
       ['Content-Encoding', encoding]
@@ -472,15 +517,20 @@ describe('native content decoding', () => {
     const store = new PluginResourcePresentations()
     const received = deferred<void>()
     let invoked = false
+
     const invoke = vi.fn(async (_body, close) => {
-      if (close) return {}
+      if (close) {return {}}
       invoked = true
+
       return native(compressed, [['Content-Encoding', encoding]])
     })
+
     const opened = store.open(request(), 7, invoke, () => {
-      if (invoked) received.resolve()
+      if (invoked) {received.resolve()}
+
       return true
     })
+
     const pending = store.handle(new Request(origin(opened.url) + entry))
     await received.promise
     await store.close(opened.handleId, 7)
@@ -527,14 +577,17 @@ describe('native content decoding', () => {
     const controller = new AbortController()
     const decoding = resourceResponse(native(body, [['Content-Encoding', 'zstd']]), resourceOrigin, entry, () => true, controller.signal)
     const rejected = expect(decoding).rejects.toThrow('RESOURCE_REVOKED')
-    if (stop === 'abort') controller.abort()
-    else vi.advanceTimersByTime(15_001)
+
+    if (stop === 'abort') {controller.abort()}
+    else {vi.advanceTimersByTime(15_001)}
+
     await rejected
   })
 
   it('honors revocation before exposing identity or coded-empty bytes', async () => {
     const controller = new AbortController()
     controller.abort()
+
     for (const [body, headers] of [
       [Buffer.from('identity'), []],
       [Buffer.from('identity'), [['Content-Encoding', 'identity']]],
@@ -553,6 +606,7 @@ describe('bounded resource envelopes and safe diagnostics', () => {
   it('preserves approved path-reference redirects without following or normalizing them', async () => {
     const response = await resourceResponse(native(Buffer.alloc(0), [['Location', '/v0/resource/plugins/demo/a//other.js?code=secret#tab']]), resourceOrigin, entry)
     expect(response.headers.get('Location')).toBe('/v0/resource/plugins/demo/a//other.js?code=secret#tab')
+
     for (const location of ['./other.js', 'https://evil.test/', '//evil.test/', '/api/config', '/v0/resource/plugins/other/a']) {
       await expect(resourceResponse(native(Buffer.alloc(0), [['Location', location]]), resourceOrigin, entry)).rejects.toThrow()
     }
@@ -561,6 +615,7 @@ describe('bounded resource envelopes and safe diagnostics', () => {
     const exact = Buffer.alloc(MAX_PLUGIN_RESOURCE_BODY, 65)
     expect((await (await resourceResponse(native(exact), resourceOrigin, entry)).arrayBuffer()).byteLength).toBe(MAX_PLUGIN_RESOURCE_BODY)
     await expect(resourceResponse(native(Buffer.alloc(MAX_PLUGIN_RESOURCE_BODY + 1)), resourceOrigin, entry)).rejects.toThrow()
+
     for (const encoded of ['!AAA', 'A===', 'AA=A', 'A']) {
       const envelope = native()
       envelope.data.body_base64 = encoded

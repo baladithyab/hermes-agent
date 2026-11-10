@@ -731,12 +731,13 @@ def _entry_point_is_declared_general_plugin(ep) -> bool:
     A matching declarative target leaves that entry point to the isolated PluginManager.
     """
     from utils import fast_safe_load
+    from hermes_yaml import YAMLError
 
     kinds = set()
     for path in _entry_point_manifest_files(ep):
         try:
             data = fast_safe_load(path.read_text(encoding="utf-8-sig"))
-        except Exception:
+        except (OSError, ValueError, YAMLError):
             continue  # Unreadable/invalid YAML is unknown, never permission to import code.
         if not isinstance(data, dict) or data.get("name") != ep.name or data.get("entry_point") != ep.value:
             continue

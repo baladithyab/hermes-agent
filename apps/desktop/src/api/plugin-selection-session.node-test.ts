@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+
 import { PluginSelectionSession } from './plugin-selection-session.js'
 
 const owner = (profile: string) => ({ profile, connectionId: 'local' })
@@ -9,11 +10,15 @@ test('switch invalidates queued reads and deselects old owner before selecting n
   const calls: string[] = []
   let release!: () => void
   const held = new Promise<void>(resolve => { release = resolve })
+
   const session = new PluginSelectionSession(async (o, path, token) => {
     calls.push(`${o.profile}:${path}:${token.epoch}`)
-    if (calls.length === 1) await held
+
+    if (calls.length === 1) {await held}
+
     return { scope_id: 'a'.repeat(32), epoch: token.epoch + 1 }
   }, () => 'client_identity_1234')
+
   session.change(owner('A'))
   const stale = session.acquire()
   const refused = assert.rejects(stale, /STALE_SCOPE/)
@@ -34,11 +39,15 @@ test('switch invalidates queued reads and deselects old owner before selecting n
 
 test('lost deselection acknowledgment latches closed, never selects another host', async () => {
   const calls: string[] = []
+
   const session = new PluginSelectionSession(async (o, path, token) => {
     calls.push(`${o.profile}:${path}`)
-    if (path === 'deselection') throw new Error('network lost')
+
+    if (path === 'deselection') {throw new Error('network lost')}
+
     return { scope_id: 'b'.repeat(32), epoch: token.epoch + 1 }
   }, () => 'client_identity_1234')
+
   session.change(owner('A'))
   await session.acquire()
   session.change(owner('B'))
@@ -52,6 +61,7 @@ test('late responses and rapid ABA are invalid even before switch acknowledgment
   const session = new PluginSelectionSession(async (_o, _p, token) => ({
     scope_id: 'c'.repeat(32), epoch: token.epoch + 1
   }), () => 'client_identity_1234')
+
   session.change(owner('A'))
   const original = await session.acquire()
   session.change(owner('B'))

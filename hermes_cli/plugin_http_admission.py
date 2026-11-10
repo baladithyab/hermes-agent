@@ -110,7 +110,7 @@ async def plugin_io(call, *args, receipt=False, **kwargs):
                 await asyncio.shield(future)
             except asyncio.CancelledError:
                 continue
-            except Exception:
+            except Exception:  # health: allow BLE001 -- drain the invocation failure while preserving caller cancellation and its reservation
                 break
         if future.done() and not future.cancelled():
             future.exception()

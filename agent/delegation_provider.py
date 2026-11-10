@@ -22,6 +22,11 @@ Route vocabulary (:meth:`DelegationProvider.route_task` returns a dict with any 
 * ``service_tier`` - ``normal``, ``fast`` or ``ultrafast``, checked like ``/fast`` against the
   resolved route (and, for ultrafast, the Codex account); a tier the route does not offer refuses
   the task, and the tier is re-applied after the child is built.
+* ``model_selection`` - ``True`` requests the canonical model selector for a named
+  provider/model pair before child construction. Core retains its resolved credential
+  source, alias endpoint and API mode; credentials never pass through the backend.
+  ``{"allowed": [{"provider": "...", "model": "..."}]}`` additionally requires the
+  final canonical pair to appear in that exact list (an empty list denies all).
 * ``profile`` - the name of a Hermes profile. Core runs the child as that profile: its config,
   primary model and credentials, skills, ``SOUL.md`` and terminal policy, bound through the same
   scope helpers a multiplexed gateway uses for a routed turn. A profile route ignores the other
@@ -50,7 +55,7 @@ RESERVED_TASK_PARAMETERS = frozenset({
 #: Keys a route may carry; anything else in a provider's answer is ignored.
 ROUTE_KEYS = frozenset({
     "model", "provider", "base_url", "api_key", "api_mode", "request_overrides",
-    "reasoning_effort", "service_tier", "fallback_providers", "profile", "label",
+    "reasoning_effort", "service_tier", "fallback_providers", "profile", "label", "model_selection",
 })
 
 

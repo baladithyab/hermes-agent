@@ -4,7 +4,7 @@ import type { DesktopProfileRoute } from './desktop-profile'
 import type { HudModifierApi, HudModifierStatus } from './hud-modifier-types'
 import { parsePluginFileSaveRequest, type PluginFileSaveRequest } from './plugin-file-save-contract'
 import type { PluginResourceBridgeRequest } from './plugin-resource-contract'
-import type { PluginSessionOpen, PluginSessionCall } from './plugin-session-contract'
+import type { PluginSessionCall, PluginSessionOpen } from './plugin-session-contract'
 import { customWindowControlsEnabled } from './window-controls'
 
 // Which translucency the OS can back. Asked synchronously because the renderer

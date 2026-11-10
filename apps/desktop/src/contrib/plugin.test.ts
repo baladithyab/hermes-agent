@@ -132,6 +132,7 @@ describe('createPluginContext.os.saveFile', () => {
   it('passes bounded bytes to the explicit save capability and preserves cancellation and failures', async () => {
     const savePluginFile = vi.fn().mockResolvedValue({ status: 'cancelled' })
     vi.stubGlobal('hermesDesktop', { savePluginFile })
+
     try {
       const save = createPluginContext('exporter').os.saveFile!
       const request = { suggestedFilename: 'credentials.json', bytes: new ArrayBuffer(32 * 1024 * 1024) }

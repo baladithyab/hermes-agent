@@ -114,7 +114,7 @@ class SelectionAuthority:
     def _allowed(policy):
         try:
             return policy() is True
-        except Exception:
+        except Exception:  # health: allow BLE001 -- arbitrary policy callbacks fail closed without logging credential-bearing exceptions
             return False
 
     def revalidate(self, operation, policy):

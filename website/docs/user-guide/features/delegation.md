@@ -341,9 +341,10 @@ Listing a profile in `delegation.backends.profile_routes` lets this profile's su
 
 This fork supplies the `explicit-routing` delegation backend through the same
 upstream provider interface. Select `delegation.backend: explicit-routing` to
-let a caller choose an exact provider/model pair for each task. The operator
-must authorize each pair in the owning profile's configuration; an empty or
-missing allowlist denies all explicit choices:
+let a caller choose a provider/model pair for each task. Choices use the same
+canonical model selection and owning-profile credentials as `/model`. Existing
+provider, model and broker policies still apply. No additional allowlist is
+required. An operator can optionally restrict exact pairs in that profile:
 
 ```yaml
 delegation:
@@ -357,11 +358,17 @@ delegation:
           model: other-local-model
 ```
 
-The providers and models must also exist in that profile's offline inventory:
-its provider catalog, or a configured custom provider's `models`, `model` or
-`default_model`. Disabled providers and unknown models are refused. Configure
-provider credentials and endpoints through the existing provider setup. They
-are resolved in the activity's owning profile, never supplied by the task.
+Omit `allowed` to preserve ordinary canonical model selection. An explicitly
+empty `allowed: []` denies all explicit selections; a malformed configured
+allowlist is an error. The optional policy also covers configured fallback
+pairs. For an explicit primary model alias, both that selection and its canonical
+resolved provider/model pair must be allowed. Custom endpoints retain `/model`'s
+acceptance of typed models absent
+from their listings; an empty `models: {}` is not a denial policy. Disabled
+providers, invalid selections and known non-chat models remain refused.
+Configure provider credentials and endpoints through the existing provider
+setup. Core resolves and validates them in the activity's owning profile,
+including alias endpoint ownership and callable credentials.
 
 Migrate the old fork's top-level `model`/`provider` arguments and raw per-task
 `model`/`provider` fields into **each affected task's `route` object**. A previous
@@ -395,18 +402,26 @@ the same can still request a different supported effort. Omitted or `null`
 Core reserved task-field validation remains unchanged; legacy raw arguments
 are no longer a routing interface and must be migrated by callers.
 
-For explicit selections, a configured `delegation.fallback_providers` list is
-preserved only when **every** entry is an allowed, known provider/model pair
-with optional supported `reasoning_effort`. Malformed or unauthorized fallback
-entries refuse the task instead of silently dropping policy. Fallback endpoint,
-key, profile and request-override fields are refused; move such settings to
-their owning provider before migration. An absent chain or `[]` gives an explicit
-selection no fallback, and never borrows the parent's fallback chain. Explicit
-choices also do not borrow `delegation.base_url`, `delegation.api_key`, or another
-route's request overrides.
+For an old model-only choice, supply its evidenced owning provider explicitly.
+If it meant the current session's route after a model switch, the caller must
+carry that selected provider rather than assume a profile default. Keep a
+delegation without any override as an omitted or null `route`. Migrate shared
+skill copies within their owning scope; do not rewrite unrelated shared targets.
+
+For explicit selections, configured `delegation.fallback_providers` retains the
+canonical operator-config normalization, including trusted endpoint, credential
+source and request settings. Every effective pair must satisfy any configured
+extra allowlist, disabled-provider gates and supported effort. Malformed or
+policy-denied fallback entries refuse the task rather than silently drop policy.
+These trusted config fields never become task-selectable fields. An absent
+chain or `[]` gives an explicit selection no fallback and never borrows the
+parent's fallback chain. Explicit choices also do not borrow
+`delegation.base_url`, `delegation.api_key`, or another route's request overrides.
 
 The plugin schema is deterministic and performs no credential minting or HTTP
-discovery. Backend switching follows the existing next-session/cache rules
+discovery. Actual dispatch uses canonical model validation, which can resolve
+credentials and probe the selected provider's catalog, as `/model` does.
+Backend switching follows the existing next-session/cache rules
 above. Global plugin isolation does not need to change.
 
 ## The `/review` Command

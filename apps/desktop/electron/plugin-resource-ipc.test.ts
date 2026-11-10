@@ -9,6 +9,7 @@ import { PluginResourcePresentations } from './plugin-resource-presentation'
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
+
   return { promise, resolve }
 }
 
@@ -31,6 +32,7 @@ function setup() {
   registerPluginResourceIpc({ presentations, isTrustedWindow: trusted, rendererUrl: () => 'file:///app/index.html', capture })
   const handler = (channel: string) => vi.mocked(ipcMain.handle).mock.calls.find(([name]) => name === channel)![1]
   const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent
+
   return { frame, sender, owner, presentations, invoke, capture, trusted, event,
     open: handler('hermes:plugin:resource:open'), close: handler('hermes:plugin:resource:close') }
 }
@@ -55,7 +57,9 @@ describe('trusted resource presenter IPC', () => {
     const h = setup()
     const pendingCapture = deferred<unknown>()
     const started = deferred<void>()
-    h.capture.mockImplementation(() => { started.resolve(); return pendingCapture.promise })
+    h.capture.mockImplementation(() => { started.resolve();
+
+ return pendingCapture.promise })
     const pending = h.open(h.event, request())
     const failed = expect(pending).rejects.toThrow('RESOURCE_UNAVAILABLE')
     await started.promise

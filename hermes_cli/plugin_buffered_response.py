@@ -24,7 +24,7 @@ class AdmittedPluginResponse(Response):
         try:
             # The callback includes profile/policy filesystem checks.
             return await asyncio.to_thread(self._current)
-        except Exception:
+        except Exception:  # health: allow BLE001 -- arbitrary policy callback failures revoke delivery; exception text may contain credentials
             return False
 
     async def _send(self, send, message):

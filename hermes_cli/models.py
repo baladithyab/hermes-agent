@@ -2292,25 +2292,6 @@ _probe_neg_cache: dict[str, float] = {}
 _PROBE_NEG_TTL = 60.0  # seconds
 
 
-def _probe_neg_key(base_url: str) -> Optional[str]:
-    """``host:port`` for *base_url* (both URL candidates share one entry), or None without a host."""
-    from utils import base_url_origin
-
-    _, host, port = base_url_origin(base_url)
-    return f"{host}:{port}" if host else None
-
-
-def _probe_result(
-    models, probed_url, resolved_base_url, suggested_base_url=None, used_fallback=False
-) -> dict[str, Any]:
-    return {
-        "models": models,
-        "probed_url": probed_url,
-        "resolved_base_url": resolved_base_url,
-        "suggested_base_url": suggested_base_url,
-        "used_fallback": used_fallback}
-
-
 def probe_api_models(
     api_key: Any, base_url: Optional[str], timeout: float = 5.0,
     api_mode: Optional[str] = None, request_headers: Optional[dict[str, str]] = None,
@@ -2319,20 +2300,22 @@ def probe_api_models(
     ``anthropic_messages`` mode sends ``x-api-key`` + ``anthropic-version`` instead of a bearer; the
     ``data[].id`` response shape is identical. Callable credentials are materialized before HTTP;
     failed credentials never become anonymous probes. ``models`` is None when no candidate answered."""
+    from hermes_cli.models_probe import probe_negative_cache_key, probe_result
+
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
-        return _probe_result(None, None, "")
+        return probe_result(None, None, "")
     if callable(api_key):
         from agent.command_token_source import materialize_probe_api_key
         api_key = materialize_probe_api_key(api_key)
         if not api_key:
-            return _probe_result(None, None, normalized)
+            return probe_result(None, None, normalized)
     from providers import profile_for_host
 
     owner = profile_for_host(normalized, metadata=True)
     owned = owner.probe_models(base_url=normalized, api_key=api_key, timeout=timeout) if owner else None
     if owned is not None:
-        return _probe_result(*owned)
+        return probe_result(*owned)
 
     alternate_base = normalized[:-3].rstrip("/") if normalized.endswith("/v1") else normalized + "/v1"
     candidates: list[tuple[str, bool]] = [(normalized, False)]
@@ -2340,11 +2323,11 @@ def probe_api_models(
         candidates.append((alternate_base, True))
 
     tried: list[str] = []
-    _neg_key = _probe_neg_key(normalized)
+    _neg_key = probe_negative_cache_key(normalized)
     if _neg_key is not None:
         _neg_seen = _probe_neg_cache.get(_neg_key)
         if _neg_seen is not None and (time.monotonic() - _neg_seen) < _PROBE_NEG_TTL:
-            return _probe_result(
+            return probe_result(
                 None, normalized.rstrip("/") + "/models", normalized,
                 alternate_base if alternate_base != normalized else None)
     headers: dict[str, str] = {"User-Agent": hermes_user_agent()}
@@ -2387,13 +2370,13 @@ def probe_api_models(
             if isinstance(item, dict) and note_catalog_item(item):
                 continue
             probed.append(item.get("id", ""))
-        return _probe_result(
+        return probe_result(
             probed, url, candidate_base.rstrip("/"),
             alternate_base if alternate_base != candidate_base else normalized, is_fallback)
 
     if _neg_key is not None and all_timed_out:
         _probe_neg_cache[_neg_key] = time.monotonic()
-    return _probe_result(
+    return probe_result(
         None, tried[0] if tried else normalized.rstrip("/") + "/models", normalized,
         alternate_base if alternate_base != normalized else None)
 

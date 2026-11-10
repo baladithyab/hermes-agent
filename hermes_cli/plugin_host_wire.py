@@ -385,7 +385,7 @@ class Channel:
                 self._large_outgoing.release()
 
     def _send(self, message: dict[str, Any], *, deadline=None,
-              max_bytes: int = DEFAULT_FRAME_BYTES) -> None:
+              max_bytes: int = DEFAULT_FRAME_BYTES, before_publish=None) -> None:
         data = (json.dumps(message, separators=(",", ":"), allow_nan=True) + "\n").encode("utf-8")
         if len(data) > min(max_bytes, MAX_FRAME_BYTES):
             raise ValueError('plugin frame too large')
@@ -395,6 +395,10 @@ class Channel:
         try:
             if self._closed_reason is not None:
                 raise PluginHostUnavailable(self._closed_reason)
+            # Only the publication owner may retire incoming admission. Writers
+            # queued behind this lock still retain their bounded invocation slots.
+            if before_publish is not None:
+                before_publish()
             if self._writer_fd is None:
                 self._writer.write(data)
                 self._writer.flush()
@@ -497,11 +501,11 @@ class Channel:
                 released = True
                 if limits.extended:
                     self._large_incoming.release()
+                self._incoming.release()
         try:
             self._serve(message, limits, release)
         finally:
             release()
-            self._incoming.release()
 
     def _serve(self, message: dict[str, Any], limits: FrameLimits, release=lambda: None) -> None:
         request_id = message.get("id")
@@ -522,17 +526,16 @@ class Channel:
                 _SERVING.reset(token)
 
         reply = (context or contextvars.copy_context()).run(run)
-        # Retire invocation admission before publishing the reply. The peer can
-        # submit its next request as soon as it reads the terminating newline.
-        release()
         if request_id is None:
+            release()
             return
         try:
-            self._send(reply, max_bytes=limits.response_bytes)
+            self._send(reply, max_bytes=limits.response_bytes, before_publish=release)
         except PluginHostUnavailable:
             pass
         except (TypeError, ValueError) as exc:  # unserializable result slipped past encode()
-            self._send({"id": request_id, "error": {"type": "TypeError", "message": str(exc)}})
+            self._send({"id": request_id, "error": {"type": "TypeError", "message": str(exc)}},
+                       before_publish=release)
 
     def result_of(self, reply: dict[str, Any]) -> Any:
         if "error" in reply:

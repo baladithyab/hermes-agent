@@ -4,7 +4,9 @@ import time
 import pytest
 
 from hermes_cli.plugin_host_wire import PluginHostUnavailable
-from tests.hermes_cli.test_plugin_asgi_lifecycle import hosted
+from tests.hermes_cli import test_plugin_asgi_lifecycle as lifecycle
+
+hosted = lifecycle.hosted
 
 
 FAULT_API = '''

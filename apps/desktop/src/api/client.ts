@@ -624,10 +624,12 @@ export const $apiRequestScope: MapStore<ApiRequestScope> = map<ApiRequestScope>(
 // Keep the comparison private; consumers observe only a credential-free epoch.
 export const $apiBackendRevision = atom(0)
 let backendIdentity = ''
+
 export function setApiRequestBackend(connection: Pick<HermesConnection, 'baseUrl' | 'token' | 'mode' | 'authMode' | 'remoteIdentity'> | null): void {
-  if (!connection) return
+  if (!connection) {return}
   const identity = JSON.stringify([connection.baseUrl, connection.mode, connection.authMode, connection.remoteIdentity, connection.token])
-  if (identity === backendIdentity) return
+
+  if (identity === backendIdentity) {return}
   backendIdentity = identity
   $apiBackendRevision.set($apiBackendRevision.get() + 1)
 }

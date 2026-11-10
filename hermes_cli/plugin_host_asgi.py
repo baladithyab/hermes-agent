@@ -74,7 +74,7 @@ class DashboardLifetimes:
                 for _, lifespan in apps.values():
                     try:
                         await asyncio.wait_for(lifespan.__aexit__(None, None, None), timeout=3)
-                    except Exception as exc:
+                    except Exception as exc:  # health: allow BLE001 -- preserve each plugin teardown failure in the returned lifecycle errors
                         slot.failed = True
                         errors.append(f'{type(exc).__name__}: {exc}')
                 sys.modules.pop(f'hermes_dashboard_plugin_{plugin}', None)

@@ -1,3 +1,5 @@
+import { randomUuid } from '@hermes/shared'
+
 // Comparison tokens are issued by the authenticated host, never by the guest.
 export interface SelectionOwner {
   profile: string | null
@@ -21,7 +23,7 @@ export class PluginSelectionSession {
   private exchange: Exchange
   private clientId: () => string
 
-  constructor(exchange: Exchange, clientId: () => string = () => crypto.randomUUID()) {
+  constructor(exchange: Exchange, clientId: () => string = randomUuid) {
     this.exchange = exchange
     this.clientId = clientId
   }
@@ -29,7 +31,8 @@ export class PluginSelectionSession {
   change(owner: SelectionOwner): void {
     const captured = { ...owner }
     const key = JSON.stringify(captured)
-    if (key === this.desired) return
+
+    if (key === this.desired) {return}
     this.desired = key
     const generation = ++this.generation
     // Do not recover an ambiguous write by silently minting a new client.
@@ -41,6 +44,7 @@ export class PluginSelectionSession {
         this.routes.set(JSON.stringify(old.owner), this.validate(old.token, ack))
         this.selected = null
       }
+
       const token = this.routes.get(key) ?? { client: this.clientId(), epoch: 0 }
       const ack = await this.exchange(captured, 'selection', token)
       const acknowledged = this.validate(token, ack)
@@ -55,15 +59,18 @@ export class PluginSelectionSession {
     if (!ack || !/^[a-f0-9]{32}$/.test(ack.scope_id) || !Number.isSafeInteger(ack.epoch) || ack.epoch <= token.epoch) {
       throw new Error('STALE_SCOPE')
     }
+
     return { client: token.client, scope: ack.scope_id, epoch: ack.epoch }
   }
 
   async acquire(): Promise<SelectionLease> {
     const generation = this.generation
     await this.tail
+
     if (!this.selected || generation !== this.generation || this.selected.generation !== generation) {
       throw new Error('STALE_SCOPE')
     }
+
     return this.selected
   }
 

@@ -35,3 +35,13 @@ docker/entrypoint.sh text eol=lf
 *.html  text eol=lf
 *.svg   text eol=lf
 *.ps1   text eol=crlf
+
+# Extensionless launchers also execute on Linux from Windows-created clones.
+activate text eol=lf
+hermes text eol=lf
+scripts/check text eol=lf
+scripts/hermes-gateway text eol=lf
+scripts/run-in-hermes-env text eol=lf
+docker/cont-init.d/* text eol=lf
+docker/s6-rc.d/**/run text eol=lf
+docker/s6-rc.d/**/finish text eol=lf

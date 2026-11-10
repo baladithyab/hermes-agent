@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+
 import { pluginSelectionHeaders } from './plugin-selection.js'
 
 test('selection bridge permits only comparison tokens on plugin routes', () => {
@@ -10,9 +11,11 @@ test('selection bridge permits only comparison tokens on plugin routes', () => {
     'X-Hermes-Plugin-Scope': token.scope,
     'X-Hermes-Plugin-Epoch': '7'
   })
+
   for (const invalid of [{ ...token, epoch: true }, { ...token, epoch: -1 },
     { ...token, client: 'injected\r\nheader' }, { ...token, scope: 'bad' }]) {
     assert.throws(() => pluginSelectionHeaders('/api/plugins/hermes-cpa/config', invalid as never))
   }
+
   assert.throws(() => pluginSelectionHeaders('/api/status', token))
 })

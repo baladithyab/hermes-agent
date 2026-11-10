@@ -5479,7 +5479,6 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         if not cleaned:
             return False
         # Thread names are budgeted in UTF-16 code units (emoji count double) — use the UTF-16 helpers.
-        from gateway.platforms.base import utf16_len, _prefix_within_utf16_limit
         if utf16_len(cleaned) > 80:
             cleaned = _prefix_within_utf16_limit(cleaned, 77).rstrip() + "..."
         try:

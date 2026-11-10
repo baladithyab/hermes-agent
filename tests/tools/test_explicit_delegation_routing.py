@@ -1,8 +1,12 @@
 """Explicit route policy through real plugin discovery and core credential routing."""
 import copy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import shlex
 import shutil
+import sys
+import threading
 from types import SimpleNamespace
 
 import hermes_yaml as yaml
@@ -23,13 +27,38 @@ def environment(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv('HOME', str(tmp_path / 'os-home'))
     monkeypatch.setenv('HERMES_HOME', str(home))
+    registry = {'synthetic': {'id': 'synthetic', 'models': {
+        'seed-chat': {'id': 'seed-chat', 'tool_call': True}}}}
+    (home / 'models_dev_cache.json').write_text(json.dumps(registry), encoding='utf-8')
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.path, self.headers.get('Authorization')))
+            value = registry if self.path == '/models-dev.json' else {
+                'object': 'list', 'data': [{'id': 'shared-model'}, {'id': 'a-only'}]}
+            body = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = f'http://127.0.0.1:{server.server_port}'
     cfg = {
+        'models_dev': {'url': origin + '/models-dev.json'},
         'plugins': {'isolation': 'host', 'enabled': ['explicit-routing']},
         'providers': {
-            'route-a': {'name': 'Route A', 'base_url': 'http://127.0.0.1:9011/v1',
-                        'api_key': 'generated-route-a', 'models': {'shared-model': {}, 'a-only': {}}},
-            'route-b': {'name': 'Route B', 'base_url': 'http://127.0.0.1:9012/v1',
-                        'api_key': 'generated-route-b', 'models': {'shared-model': {}}},
+            'route-a': {'name': 'Route A', 'base_url': origin + '/a/v1', 'api_mode': 'chat_completions',
+                        'api_key': 'generated-route-a', 'models': {}},
+            'route-b': {'name': 'Route B', 'base_url': origin + '/b/v1', 'api_mode': 'chat_completions',
+                        'api_key': 'generated-route-b', 'models': {}},
         },
         'delegation': {'backend': 'explicit-routing', 'base_url': 'http://127.0.0.1:9/wrong',
                        'api_key': 'generated-wrong-delegation-key',
@@ -59,10 +88,13 @@ def environment(tmp_path, monkeypatch):
         managers.append(manager)
         return manager
 
-    yield SimpleNamespace(home=home, cfg=cfg, save=save, load=load)
+    yield SimpleNamespace(home=home, cfg=cfg, save=save, load=load, origin=origin, requests=requests)
     for manager in managers:
         manager.unload()
         manager._plugin_host().shutdown()
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
 
 
 def _parent():
@@ -97,24 +129,31 @@ def test_discovery_schema_is_static_and_explicit_routes_use_the_owning_provider(
     assert not ({'model', 'provider', 'api_key', 'base_url'} & set(params))
     assert params['route']['additionalProperties'] is False
     routes = _routes(environment, [{'goal': 'first', 'route': _A}, {'goal': 'second', 'route': _B}])
+    assert not any(route.error for route in routes)
     assert [route.creds['provider'] for route in routes] == ['custom:route-a', 'custom:route-b']
-    assert [route.creds['base_url'] for route in routes] == ['http://127.0.0.1:9011/v1', 'http://127.0.0.1:9012/v1']
+    assert [route.creds['base_url'] for route in routes] == [environment.origin + '/a/v1', environment.origin + '/b/v1']
     assert [route.creds['api_key'] for route in routes] == ['generated-route-a', 'generated-route-b']
     assert all(route.creds['request_overrides'] == {} for route in routes)
+    probes = [(path, key) for path, key in environment.requests if path.endswith('/models')]
+    assert ('/a/v1/models', 'Bearer generated-route-a') in probes
+    assert ('/b/v1/models', 'Bearer generated-route-b') in probes
+    assert not any(key == 'Bearer generated-wrong-parent-key' or '/wrong' in path for path, key in probes)
     assert json.dumps(schema_extension(cfg), sort_keys=True) == before
     assert environment.cfg['plugins']['isolation'] == 'host'
     assert not any(loaded.error for loaded in manager._plugins.values())
+    assert _routes(environment, [{'goal': 'no internal selector input', 'model_selection': True}])[0].error
 
 
 @pytest.mark.parametrize('selection', [
     {'provider': 'custom:route-b', 'model': 'a-only'},
     {'provider': 'custom:missing', 'model': 'shared-model'},
-    {**_A, 'api_key': 'generated-injection'}, {**_A, 'base_url': 'http://127.0.0.1:9/injected'},
+    {**_A, 'api_key': 'generated-injection'}, {**_A, 'key_env': 'OTHER_ROUTE_KEY'},
+    {**_A, 'base_url': 'http://127.0.0.1:9/injected'}, {**_A, 'model_selection': True},
     {**_A, 'profile': 'another'}, {**_A, 'request_overrides': {}},
     {**_A, 'fallback_providers': []}, {**_A, 'reasoning_effort': 'super'},
     {**_A, 'reasoning_effort': {'effort': 'high'}}, {**_A, 'reasoning_effort': False},
-    {**_A, 'reasoning_effort': 'ultra'}, {**_A, 'model': ''}, {**_A, 'provider': ''},
-    {**_A, 'model': 'shared-model --provider route-b'}, {'provider': 'custom:route-a'},
+    {**_A, 'reasoning_effort': 'ultra'}, {**_A, 'model': ''}, {**_A, 'model': ' '},
+    {**_A, 'model': 2}, {**_A, 'provider': ''}, {'provider': 'custom:route-a'},
     [], '', 4, False,
 ])
 def test_non_null_invalid_or_unauthorized_selection_refuses_only_that_task(environment, selection):
@@ -124,47 +163,77 @@ def test_non_null_invalid_or_unauthorized_selection_refuses_only_that_task(envir
     assert not good.error and good.creds['provider'] == _B['provider']
 
 
-@pytest.mark.parametrize('change', ['missing-policy', 'disabled', 'unknown-model', 'unknown-provider'])
-def test_policy_and_current_provider_inventory_both_gate_a_choice(environment, change):
+@pytest.mark.parametrize('model', ['unpublished-model', 'My Custom Model', 'x' * 300])
+@pytest.mark.parametrize('placement', ['bundled', 'host'])
+def test_absent_extra_allowlist_preserves_unlisted_custom_models(environment, model, placement):
+    environment.cfg['delegation']['backends'] = {}
+    environment.load(placement)
+    route, = _routes(environment, [{'goal': 'typed custom model', 'route': {**_A, 'model': model}}])
+    assert not route.error and route.creds['model'] == model
+    assert environment.cfg['providers']['route-a']['models'] == {}
+
+
+@pytest.mark.parametrize('policy', [[], None, {}, 'invalid', [None], [{**_A, 'base_url': 'forbidden'}]])
+def test_configured_empty_or_malformed_allowlist_refuses(environment, policy):
+    environment.cfg['delegation']['backends']['explicit-routing']['allowed'] = policy
     environment.load()
-    if change == 'missing-policy':
-        environment.cfg['delegation']['backends'] = {}
-    elif change == 'disabled':
+    assert _routes(environment, [{'goal': 'refuse policy', 'route': _A}])[0].error
+
+
+@pytest.mark.parametrize('backends', [None, [], {'explicit-routing': None}, {'explicit-routing': []}])
+def test_malformed_backend_policy_block_refuses(environment, backends):
+    environment.cfg['delegation']['backends'] = backends
+    environment.load()
+    assert _routes(environment, [{'goal': 'refuse malformed settings', 'route': _A}])[0].error
+
+
+@pytest.mark.parametrize('change', ['disabled', 'unknown-provider', 'non-chat'])
+def test_existing_provider_and_canonical_model_gates_remain(environment, change):
+    environment.cfg['delegation']['backends'] = {}
+    if change == 'disabled':
         environment.cfg['providers']['route-a']['enabled'] = False
-    elif change == 'unknown-model':
-        environment.cfg['delegation']['backends']['explicit-routing']['allowed'].append(
-            {'provider': _A['provider'], 'model': 'unpublished-model'})
-    else:
-        environment.cfg['delegation']['backends']['explicit-routing']['allowed'].append(
-            {'provider': 'custom:missing', 'model': 'shared-model'})
-    environment.save()
-    selection = {**_A, 'model': 'unpublished-model'} if change == 'unknown-model' else _A
-    if change == 'unknown-provider':
-        selection = {'provider': 'custom:missing', 'model': 'shared-model'}
+    environment.load()
+    selection = {'provider': 'custom:missing', 'model': 'shared-model'} if change == 'unknown-provider' else _A
+    if change == 'non-chat':
+        selection = {**_A, 'model': 'synthetic-image-model'}
     assert _routes(environment, [{'goal': 'must refuse', 'route': selection}])[0].error
+    if change == 'disabled':
+        assert not any(path.startswith('/a/') for path, _ in environment.requests)
 
 
 @pytest.mark.parametrize('fallback', [
     [_B], [], [{**_B, 'reasoning_effort': 'low'}],
+    [{**_B, 'api_key': 'generated-operator-key', 'base_url': 'http://127.0.0.1:9/operator/v1'}],
+    [{**_B, 'key_env': 'ROUTE_B_KEY', 'request_overrides': {'extra_body': {'operator': True}}}], _B,
 ])
-def test_allowed_configured_fallback_chain_is_preserved(environment, fallback):
+def test_trusted_configured_fallback_chain_is_preserved(environment, fallback):
+    from hermes_cli.fallback_config import get_fallback_chain
     from tools.delegate_tool_config import _resolve_child_fallback_chain
     environment.cfg['delegation']['fallback_providers'] = fallback
     environment.load()
     route, = _routes(environment, [{'goal': 'allowed fallback', 'route': _A}])
-    assert not route.error and route.routing_cfg['fallback_providers'] == fallback
-    assert _resolve_child_fallback_chain(_parent(), route.routing_cfg, pinned=True) == (fallback or None)
+    expected = get_fallback_chain({'fallback_providers': fallback}) or []
+    assert not route.error and route.routing_cfg['fallback_providers'] == expected
+    assert _resolve_child_fallback_chain(_parent(), route.routing_cfg, pinned=True) == (expected or None)
 
 
 @pytest.mark.parametrize('fallback', [
     [{'provider': 'custom:route-b', 'model': 'not-allowed'}],
-    [{**_B, 'api_key': 'generated-injection'}], [{**_B, 'base_url': 'http://127.0.0.1:9/injected'}],
-    [{**_B, 'key_env': 'OTHER_ROUTE_KEY'}], [{'provider': _B['provider']}], [None], {'provider': _B['provider']},
+    [{**_B, 'reasoning_effort': 'super'}], [{'provider': _B['provider']}], [None],
+    {'provider': _B['provider']}, 'invalid',
 ])
 def test_unsafe_configured_fallback_policy_is_refused_without_silent_dropping(environment, fallback):
     environment.cfg['delegation']['fallback_providers'] = fallback
     environment.load()
     assert _routes(environment, [{'goal': 'unsafe fallback', 'route': _A}])[0].error
+
+
+def test_disabled_fallback_is_refused_without_an_extra_allowlist(environment):
+    environment.cfg['delegation']['backends'] = {}
+    environment.cfg['delegation']['fallback_providers'] = [_B]
+    environment.cfg['providers']['route-b']['enabled'] = False
+    environment.load()
+    assert _routes(environment, [{'goal': 'disabled fallback', 'route': _A}])[0].error
 
 
 def test_absent_and_null_routes_keep_ordinary_delegation_and_pinned_backend(environment):
@@ -185,31 +254,56 @@ def test_absent_and_null_routes_keep_ordinary_delegation_and_pinned_backend(envi
     assert schema_extension({**cfg, 'backend': 'explicit-routing'}) == before
 
 
-def test_callable_provider_credentials_remain_callable_and_schema_never_mints(environment, monkeypatch):
+@pytest.mark.parametrize('placement', ['bundled', 'host'])
+def test_schema_never_mints_and_core_retains_positive_ttl_callable(environment, placement):
     from tools.delegate_tool_routes import schema_extension
-    from tools import delegate_tool as dt
-    from tests.tools.test_delegation_route_fields import _construct
-    marker = environment.home / 'must-not-exist'
+    marker = environment.home / 'mint-count'
+    helper = environment.home / 'synthetic-token.py'
+    helper.write_text(
+        'import json\nfrom pathlib import Path\n'
+        f'p = Path({str(marker)!r})\n'
+        'p.write_text(str(int(p.read_text()) + 1) if p.exists() else "1")\n'
+        'print(json.dumps({"access_token": "generated-route-a", "expires_in": 3600}))\n', encoding='utf-8')
     provider = environment.cfg['providers']['route-a']
     provider.pop('api_key')
-    provider['key_cmd'] = f"printf generated-token > {marker.as_posix()}"
-    environment.load()
+    provider['key_cmd'] = f'{shlex.quote(sys.executable)} {shlex.quote(str(helper))}'
+    environment.load(placement)
     before = schema_extension(environment.cfg['delegation'])
+    assert not marker.exists()
     route, = _routes(environment, [{'goal': 'callable credential', 'route': _A}])
     assert not route.error and callable(route.creds['api_key'])
     assert route.creds['base_url'] == provider['base_url']
+    assert marker.read_text() == '1'
+    assert route.creds['api_key']() == 'generated-route-a'
+    assert marker.read_text() == '1'  # validation's positive-TTL source survives into the child bundle
     assert schema_extension(environment.cfg['delegation']) == before
-    built = []
 
-    def construct(**kwargs):
-        built.append(kwargs)
-        return _construct(**kwargs)
 
-    monkeypatch.setattr('run_agent.AIAgent', construct)
-    monkeypatch.setattr(dt, '_run_batch', lambda batch, background: json.dumps({'built': len(batch.children)}))
-    result = json.loads(dt.delegate_task(tasks=[{'goal': 'preserve callable', 'route': _A}], parent_agent=_parent()))
-    assert result == {'built': 1} and callable(built[0]['api_key'])
-    assert not marker.exists()
+def test_canonical_alias_endpoint_and_credential_survive_core_selection(environment):
+    environment.cfg['delegation']['backends'] = {}
+    environment.cfg['model_aliases'] = {'alternate': {
+        'model': 'shared-model', 'provider': _A['provider'],
+        'base_url': environment.origin + '/alias/v1', 'api_key': 'generated-alias-key'}}
+    environment.load('host')
+    route, = _routes(environment, [{'goal': 'canonical alias', 'route': {**_A, 'model': 'alternate'}}])
+    assert not route.error and route.creds['model'] == 'shared-model'
+    assert route.creds['base_url'] == environment.origin + '/alias/v1'
+    assert route.creds['api_key'] == 'generated-alias-key'
+
+
+@pytest.mark.parametrize('allow_canonical', [False, True])
+def test_configured_policy_also_gates_canonical_alias_model(environment, allow_canonical):
+    alias = {**_A, 'model': 'alternate'}
+    environment.cfg['delegation']['backends']['explicit-routing']['allowed'] = [alias]
+    if allow_canonical:
+        environment.cfg['delegation']['backends']['explicit-routing']['allowed'].append(_A)
+    environment.cfg['model_aliases'] = {'alternate': {'model': 'shared-model', 'provider': _A['provider']}}
+    environment.load('host')
+    route, = _routes(environment, [{'goal': 'canonical policy', 'route': alias}])
+    if allow_canonical:
+        assert not route.error and route.creds['model'] == 'shared-model'
+    else:
+        assert route.error
 
 
 def test_real_delegate_builder_preserves_same_model_effort_changes_and_owned_credentials(environment, monkeypatch):

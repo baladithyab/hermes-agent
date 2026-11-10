@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+
 import type { SaveDialogOptions, SaveDialogReturnValue } from 'electron'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,6 +12,7 @@ import { PLUGIN_FILE_SAVE_MAX_BYTES } from './plugin-file-save-contract'
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
+
   return { promise, resolve }
 }
 
@@ -35,6 +37,7 @@ describe('trusted plugin file save', () => {
     await writeFile(destination, 'previous contents')
     const data = new Uint8Array(PLUGIN_FILE_SAVE_MAX_BYTES).fill(117)
     let shown: SaveDialogOptions | undefined
+
     const result = await savePluginFile({
       suggestedFilename: 'export.json', bytes: data.buffer,
       path: path.join(directory, 'guest-selected.json')
@@ -42,14 +45,17 @@ describe('trusted plugin file save', () => {
       isAuthorized: () => true,
       showSaveDialog: async options => {
         shown = options
+
         return { canceled: false, filePath: destination }
       }
     })
+
     expect(result).toEqual({ status: 'saved' })
     expect((await readFile(destination)).equals(Buffer.from(data.buffer))).toBe(true)
     expect(await readdir(directory)).toEqual(['chosen.json'])
     expect(shown?.defaultPath).toBe('export.json')
     expect(shown?.properties).toContain('showOverwriteConfirmation')
+
     if (process.platform !== 'win32') {
       expect((await stat(destination)).mode & 0o777).toBe(0o600)
     }
@@ -77,9 +83,11 @@ describe('trusted plugin file save', () => {
     const decision = deferred<SaveDialogReturnValue>()
     let authorized = true
     const destination = path.join(directory, 'export.json')
+
     const pending = savePluginFile({ suggestedFilename: 'export.json', bytes: new ArrayBuffer(1) }, {
       isAuthorized: () => authorized, showSaveDialog: () => decision.promise
     })
+
     authorized = false
     decision.resolve({ canceled: false, filePath: destination })
     await expect(pending).rejects.toThrow('no longer authorized')
@@ -87,9 +95,11 @@ describe('trusted plugin file save', () => {
 
     const bytes = new Uint8Array([1, 2, 3])
     const selected = deferred<SaveDialogReturnValue>()
+
     const captured = savePluginFile({ suggestedFilename: 'export.json', bytes: bytes.buffer }, {
       isAuthorized: () => true, showSaveDialog: () => selected.promise
     })
+
     bytes.fill(9)
     selected.resolve({ canceled: false, filePath: destination })
     await expect(captured).resolves.toEqual({ status: 'saved' })

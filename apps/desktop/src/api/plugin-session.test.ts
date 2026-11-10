@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
 import { createPluginContext } from '@/contrib/plugin'
-import { setApiRequestBackend, setApiRequestConnection, setApiRequestProfile } from './client'
+
 import type { PluginSessionCall, PluginSessionOpen, PluginSessionReply } from '../../electron/plugin-session-contract'
+
+import { setApiRequestBackend, setApiRequestConnection, setApiRequestProfile } from './client'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
+
   return { promise, resolve }
 }
 
@@ -13,24 +17,31 @@ function host() {
   let sequence = 0
   const owners = new Map<string, PluginSessionOpen>()
   const calls: Array<{ handle: string; request: PluginSessionCall }> = []
+
   const open = vi.fn(async (request: PluginSessionOpen) => {
     const handle = `captured-${++sequence}`
     owners.set(handle, request)
+
     return handle
   })
+
   const call = vi.fn(async (handle: string, request: PluginSessionCall): Promise<PluginSessionReply> => {
     calls.push({ handle, request })
+
     if (request.path === '/_host/selection' || request.path === '/_host/deselection') {
       return { ok: true, value: { scope_id: 'a'.repeat(32), epoch: request.selection.epoch + 1 } }
     }
+
     return { ok: true, value: { owner: owners.get(handle)?.owner } }
   })
+
   const close = vi.fn(async (_handle: string) => undefined)
   const closePluginResource = vi.fn(async (_handle: string) => undefined)
   const presentPluginResource = vi.fn(async () => ({ handleId: 'resource-handle', url: 'hermes-plugin-resource://local/__hermes_plugin_resource__' }))
   Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: {
     pluginSession: { open, call, close }, presentPluginResource, closePluginResource
   } })
+
   return { open, call, close, calls, owners, presentPluginResource, closePluginResource }
 }
 
@@ -79,7 +90,9 @@ describe('captured Desktop plugin sessions', () => {
       owner: { connectionId: 'resource-owner', profile: 'alpha' }, selection: h.calls[1].request.selection })
     const result = deferred<PluginSessionReply>()
     const started = deferred<void>()
-    h.call.mockImplementationOnce(async () => { started.resolve(); return result.promise })
+    h.call.mockImplementationOnce(async () => { started.resolve();
+
+ return result.promise })
     const pending = session.rest('/console/result')
     const rejected = expect(pending).rejects.toThrow('STALE_SCOPE')
     await started.promise

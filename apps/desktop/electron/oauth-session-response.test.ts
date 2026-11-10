@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { wireOauthSessionResponse } from './oauth-session-response'

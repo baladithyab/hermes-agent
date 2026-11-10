@@ -40,14 +40,17 @@ export function wireOauthSessionResponse(res: OauthResponseLike, opts: WireOauth
   res.on('data', chunk => {
     if (!settled && !isTimedOut()) {
       received += chunk.length
+
       if (opts.maxResponseBytes !== undefined && received > opts.maxResponseBytes) {
         settled = true
         chunks.length = 0
         clearTimer()
         reject(new Error('Bounded plugin response is too large'))
         opts.abort?.()
+
         return
       }
+
       chunks.push(Buffer.from(chunk))
     }
   })

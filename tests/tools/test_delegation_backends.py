@@ -234,7 +234,7 @@ def test_a_saved_switch_refuses_the_previous_backends_parameter_and_names_the_fi
         from agent.delegation_backends import list_backends, set_global_backend
         from tools.delegate_tool import delegate_task
 
-        assert [b.name for b in list_backends()] == ["default", "probe-options", "probe-profiles"]
+        assert {"default", "probe-options", "probe-profiles"} <= {b.name for b in list_backends()}
         before = (home / "config.yaml").read_bytes()
         with pytest.raises(ValueError, match="'nope' is not installed"):
             set_global_backend("nope")

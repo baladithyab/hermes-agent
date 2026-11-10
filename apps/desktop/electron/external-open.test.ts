@@ -211,14 +211,17 @@ test('OAuth launch secrets reach the browser and failure UI but never launch log
   const url = 'https://auth.example.test/authorize?state=private-state&code=private-code#private-fragment'
   const proc = new EventEmitter() as unknown as ChildProcess
   const spawned: string[] = []
+
   const { deps, calls } = makeDeps({
     isWsl: true,
     spawn: (cmd, args) => {
       spawned.push(cmd, ...args)
+
       return proc
     },
     openExternal: async () => { throw new Error(`Could not open ${url}`) }
   })
+
   const notification = new Promise<void>(resolve => {
     deps.notifyFailure = (openedUrl, message) => {
       calls.notified.push([openedUrl, message])
@@ -232,6 +235,7 @@ test('OAuth launch secrets reach the browser and failure UI but never launch log
   await notification
   assert.equal(calls.notified[0]?.[0], url)
   assert.ok(calls.logged.length > 0)
+
   for (const line of calls.logged) {
     assert.ok(!line.includes('private-'), line)
     assert.ok(!line.includes(url), line)
@@ -240,9 +244,11 @@ test('OAuth launch secrets reach the browser and failure UI but never launch log
 
 test('native browser errors cannot echo OAuth query or fragment secrets into logs', async () => {
   const url = 'https://auth.example.test/?state=secret-state#secret-token'
+
   const { deps, calls } = makeDeps({
     openExternal: async () => { throw new Error(`Cannot launch ${url}`) }
   })
+
   await openExternalUrl(url, deps)
   assert.equal(calls.notified[0]?.[0], url)
   assert.ok(calls.logged.every(line => !line.includes('secret-')))

@@ -326,7 +326,7 @@ class PluginResourceMiddleware:
             raw_path = raw_path.decode('ascii', errors='strict')
             query = query.decode('ascii', errors='strict')
             response = await self.registry.fetch(host, scheme, method, raw_path, query, accept)
-        except Exception:
+        except Exception:  # health: allow BLE001 -- resource boundary redacts arbitrary backend exceptions that may contain grants or credentials
             # Never put a grant, native query or backend exception on the wire/log.
             response = Response('Resource unavailable', status_code=410, headers={'Cache-Control': 'no-store'})
         await response(scope, receive, send)
@@ -399,7 +399,7 @@ async def registration(request, name, target, context, resolver, path):
         result = await asyncio.to_thread(presentations.open, request, data, identity=identity, invoke=invoke,
                                         current=current, template=template)
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
-    except Exception as error:
+    except Exception as error:  # health: allow BLE001 -- arbitrary plugin failures become a bounded public error code, never a raw exception
         code = str(error)
         if not re.fullmatch(r'RESOURCE_[A-Z_]+', code):
             code = 'RESOURCE_UNAVAILABLE'

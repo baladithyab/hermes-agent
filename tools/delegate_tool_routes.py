@@ -234,7 +234,14 @@ def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str) -> Ta
     if route.get("profile"):
         return replace(_profile_route(_profile_home(route["profile"])), backend=backend)
     from tools.delegate_tool import _resolve_delegation_credentials  # the facade is the patch seam
-    creds = _resolve_delegation_credentials(route, parent_agent)
+    selection = route.get("model_selection", False)
+    if not isinstance(selection, (bool, Mapping)):
+        raise DelegationRouteError("model_selection must be a boolean or selection policy.")
+    if selection is not False:
+        from tools.delegate_tool_model_selection import resolve_model_selection
+        creds = resolve_model_selection(route, parent_agent)
+    else:
+        creds = _resolve_delegation_credentials(route, parent_agent)
     if route.get("service_tier") not in (None, ""):
         from tools.delegate_tool_tuning import task_service_tier
         creds = {**creds, **task_service_tier(str(route["service_tier"]), creds, parent_agent)}
