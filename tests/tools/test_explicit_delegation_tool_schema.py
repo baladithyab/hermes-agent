@@ -198,4 +198,3 @@ def test_backend_keeps_closed_route_policy_when_wire_schema_is_lossy(discovered_
     for field in ('model_selection', 'request_overrides', 'fallback_providers'):
         refused, = _routes(env, [{'goal': 'refuse raw task field', field: 'synthetic-injected'}])
         assert refused.error
-

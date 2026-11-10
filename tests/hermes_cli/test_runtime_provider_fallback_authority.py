@@ -118,5 +118,3 @@ def test_disabled_builtin_provider_never_enters_fallback(named_provider_config):
 
     with pytest.raises(ValueError, match="disabled"):
         rp.resolve_runtime_with_fallback(config, requested="deepseek")
-
-
