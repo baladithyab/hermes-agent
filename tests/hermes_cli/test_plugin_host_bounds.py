@@ -1,7 +1,10 @@
 """Real pipe backpressure must not consume the RPC deadline indefinitely."""
 import os
+import subprocess
+import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,3 +53,41 @@ def test_oversized_frame_rejected_before_dispatch():
     finally:
         reader.close()
         channel.close()
+
+
+@pytest.mark.platforms('posix')
+def test_partial_write_deadline_reaps_captured_process_and_refuses_replay(tmp_path, monkeypatch):
+    from hermes_cli.plugin_host import PluginHost
+    from hermes_cli.plugin_host_wire import PluginHostUnavailable
+
+    process = subprocess.Popen(
+        [sys.executable, '-c', "import os,threading; os.write(1,b'ready\\n'); threading.Event().wait(60)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
+    )
+    host = PluginHost(SimpleNamespace(home_path=tmp_path))
+    try:
+        assert process.stdout.readline() == b'ready\n'
+        host._proc = process
+        host._generation = 1
+        host._channel = Channel(
+            process.stdout, process.stdin, lambda *args: None, name='captured-blocked',
+            on_close=lambda reason: host._on_channel_close(1, reason),
+        ).start()
+        spawns = []
+        monkeypatch.setattr(host, '_argv', lambda: spawns.append('unexpected replacement'))
+        with pytest.raises(PluginHostDeadline):
+            host._call('large', {'body': 'x' * 1024 * 1024}, timeout=.1)
+        assert process.returncode is not None
+        assert process.wait(timeout=0) == process.returncode
+        assert host._generation == 2 and not host.alive
+        assert not host._channel._pending
+        with pytest.raises(PluginHostUnavailable, match='deadline'):
+            host.ensure_started()
+        with pytest.raises(PluginHostUnavailable, match='deadline'):
+            host._call('large', {'body': 'must not be replayed'}, timeout=.1)
+        assert host._proc is process and spawns == []
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
+        host.shutdown()

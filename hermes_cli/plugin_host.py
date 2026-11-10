@@ -173,6 +173,8 @@ class PluginHost:
         return channel
 
     def _exit_reason(self) -> str:
+        if self._deadline_failed:
+            return 'plugin RPC deadline; outcome unknown; explicit host replacement required'
         proc = self._proc
         code = proc.poll() if proc is not None else None
         if proc is not None and code is None:

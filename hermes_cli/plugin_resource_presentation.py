@@ -348,7 +348,7 @@ async def registration(request, name, target, context, resolver, path):
             manifest_path = Path(dashboard_dir) / 'manifest.json'
             if manifest_path.stat().st_size > 65536:
                 raise ValueError('RESOURCE_UNSUPPORTED')
-        manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
             if (type(manifest.get('resource_presentation')) is not int or manifest['resource_presentation'] != 1
                     or type(manifest.get('request_context')) is not int or manifest['request_context'] != 1):
                 raise ValueError('RESOURCE_UNSUPPORTED')
