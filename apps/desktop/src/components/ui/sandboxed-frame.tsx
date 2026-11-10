@@ -1,10 +1,11 @@
 import type * as React from 'react'
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { htmlFromDataUrl } from '@/lib/browser-guest-document'
 import { browserBootstrap, endpointUrl } from '@/lib/browser-transport'
 import { isBrowserHostedDesktop } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+import { isPluginResourceUrl } from '../../../electron/plugin-resource-contract'
 
 /** The sandbox posture guest content gets by default: scripts run, the frame
  *  has an OPAQUE origin (no reach into the app, its storage, or the bridge). */
@@ -54,6 +55,16 @@ export function sanitizeFrameSandbox(sandbox: string | undefined): string {
  *  relative path resolves against the app's own origin. */
 const ALLOWED_SRC_SCHEMES = new Set(['data:', 'http:', 'https:'])
 
+const MAX_DATA_URL_BYTES = 2 * 1024 * 1024
+export const MAX_VERIFIED_DOCUMENT_BYTES = 8 * 1024 * 1024
+
+/** Hash of the exact UTF-8 HTML bytes, not a data URL or caller-owned blob URL.
+ *  Integrity does not grant origin privileges: this document stays opaque. */
+export interface VerifiedFrameDocument {
+  html: string
+  sha256: string
+}
+
 /** Explicit allowlist, NOT `ComponentProps<'iframe'>`: an iframe's attribute
  *  surface is how a frame gains authority — `allow` delegates
  *  Permissions-Policy (the electron permission handlers grant media capture
@@ -61,18 +72,100 @@ const ALLOWED_SRC_SCHEMES = new Set(['data:', 'http:', 'https:'])
  *  markup, `name` makes the frame a navigation target, `csp`/`credentialless`
  *  change the guest realm. None of those are props here, and no spread reaches
  *  the element, so a plugin cannot smuggle one through a cast either. */
-export interface SandboxedFrameProps {
+interface SandboxedFrameAppearance {
   className?: string
   onError?: React.ReactEventHandler<HTMLIFrameElement>
   onLoad?: React.ReactEventHandler<HTMLIFrameElement>
   ref?: React.Ref<HTMLIFrameElement>
   /** Extra sandbox tokens; filtered through the allowlist above. */
   sandbox?: string
-  /** Absolute `http(s):` or `data:` URL to embed. Anything else renders nothing. */
-  src: string
+  /** Reports document validation failures without exposing its content. */
+  onVerificationError?: (error: Error) => void
   style?: React.CSSProperties
   /** Accessible title (required — an untitled frame is unlabelled in the a11y tree). */
   title: string
+}
+
+export type SandboxedFrameProps = SandboxedFrameAppearance & (
+  | { src: string; verifiedDocument?: never }
+  | { src?: never; verifiedDocument: VerifiedFrameDocument }
+)
+
+async function verifiedDocumentBytes(document: VerifiedFrameDocument): Promise<Uint8Array<ArrayBuffer>> {
+  if (
+    typeof document.html !== 'string' ||
+    typeof document.sha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(document.sha256)
+  ) {
+    throw new Error('Invalid verified document')
+  }
+  if (document.html.length > MAX_VERIFIED_DOCUMENT_BYTES) {
+    throw new Error('Verified document exceeds 8 MiB')
+  }
+  const bytes = new TextEncoder().encode(document.html)
+  if (bytes.byteLength > MAX_VERIFIED_DOCUMENT_BYTES) {
+    throw new Error('Verified document exceeds 8 MiB')
+  }
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  if (actual !== document.sha256.toLowerCase()) {
+    throw new Error('Verified document hash mismatch')
+  }
+  return bytes
+}
+
+function useVerifiedDocumentUrl(
+  document: VerifiedFrameDocument | undefined,
+  onVerificationError: SandboxedFrameAppearance['onVerificationError']
+) {
+  const html = document?.html
+  const sha256 = document?.sha256
+  const enabled = document !== undefined
+  const [verified, setVerified] = useState<{ html: string; sha256: string; url: string } | null>(null)
+  const onFailure = useRef(onVerificationError)
+
+  useLayoutEffect(() => {
+    onFailure.current = onVerificationError
+  }, [onVerificationError])
+
+  useLayoutEffect(() => {
+    if (!enabled) {
+      return
+    }
+    let disposed = false
+    let url: string | undefined
+    // Copy the primitive fields before the async check. Caller mutation cannot
+    // change the bytes between verification and creation of the host-owned URL.
+    if (typeof html !== 'string' || typeof sha256 !== 'string') {
+      onFailure.current?.(new Error('Invalid verified document'))
+      return
+    }
+    void verifiedDocumentBytes({ html, sha256 }).then(bytes => {
+      if (disposed) {
+        return
+      }
+      url = URL.createObjectURL(new Blob([bytes], { type: 'text/html;charset=utf-8' }))
+      setVerified({ html, sha256, url })
+    }).catch(() => {
+      if (!disposed) {
+        onFailure.current?.(new Error('Verified document could not be loaded'))
+      }
+    })
+    return () => {
+      disposed = true
+      if (url) {
+        URL.revokeObjectURL(url)
+      }
+    }
+  }, [enabled, html, sha256])
+
+  // Forget retired sources during render, including A -> B -> A while B is
+  // still verifying. A revoked URL must never be mounted a second time.
+  if (verified && (!enabled || verified.html !== html || verified.sha256 !== sha256)) {
+    setVerified(null)
+    return undefined
+  }
+  return enabled && verified ? verified.url : undefined
 }
 
 /**
@@ -90,14 +183,25 @@ export interface SandboxedFrameProps {
  * (`unsafe-url` would leak the app's origin to the embedded site, which is the
  * point of `no-referrer`).
  */
-export function SandboxedFrame({ className, onError, onLoad, ref, sandbox, src, style, title }: SandboxedFrameProps) {
-  if (!hasAllowedScheme(src)) {
-    console.warn(`[SandboxedFrame] refusing to embed ${JSON.stringify(src)}: only http(s): and data: URLs are allowed`)
-
+export function SandboxedFrame({
+  className, onError, onLoad, onVerificationError, ref, sandbox, src, verifiedDocument, style, title
+}: SandboxedFrameProps) {
+  const verifiedUrl = useVerifiedDocumentUrl(verifiedDocument, onVerificationError)
+  const frameSrc = verifiedDocument !== undefined ? verifiedUrl : src
+  // The public src path never admits blob URLs, including ones copied from
+  // another frame. Only this component's successful verification can mint one.
+  if (verifiedDocument !== undefined) {
+    if (src !== undefined || !frameSrc) {
+      return null
+    }
+  } else if (!hasAllowedScheme(src)) {
+    console.warn('[SandboxedFrame] refusing an invalid or oversized frame URL')
     return null
   }
 
-  const html = isBrowserHostedDesktop() ? htmlFromDataUrl(src) : null
+  const html = isBrowserHostedDesktop()
+    ? verifiedDocument !== undefined ? verifiedDocument.html : htmlFromDataUrl(src!)
+    : null
 
   if (html !== null) {
     return (
@@ -124,14 +228,18 @@ export function SandboxedFrame({ className, onError, onLoad, ref, sandbox, src, 
       ref={ref}
       referrerPolicy="no-referrer"
       sandbox={sanitizeFrameSandbox(sandbox)}
-      src={src}
+      src={frameSrc}
       style={style}
       title={title}
     />
   )
 }
 
-interface BrowserGuestFrameProps extends Omit<SandboxedFrameProps, 'src'> {
+/** Feature detection for plugins running on older Desktop builds. */
+SandboxedFrame.supportsVerifiedDocument = true as const
+SandboxedFrame.supportsPluginResources = true as const
+
+interface BrowserGuestFrameProps extends SandboxedFrameAppearance {
   html: string
 }
 
@@ -295,9 +403,17 @@ function BrowserGuestFrame({ className, html, onError, onLoad, ref, sandbox, sty
   )
 }
 
-function hasAllowedScheme(src: string): boolean {
+function hasAllowedScheme(src: unknown): src is string {
+  if (typeof src !== 'string') {
+    return false
+  }
+  if (isPluginResourceUrl(src)) return true
   try {
-    return ALLOWED_SRC_SCHEMES.has(new URL(src).protocol)
+    const protocol = new URL(src).protocol
+    if (protocol === 'data:') {
+      return src.length <= MAX_DATA_URL_BYTES && new TextEncoder().encode(src).byteLength <= MAX_DATA_URL_BYTES
+    }
+    return ALLOWED_SRC_SCHEMES.has(protocol)
   } catch {
     return false
   }

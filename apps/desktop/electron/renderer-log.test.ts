@@ -44,6 +44,14 @@ describe('formatRendererConsoleLine', () => {
   it('drops malformed event objects', () => {
     expect(formatRendererConsoleLine('main', {})).toBeNull()
   })
+
+  it('never persists opaque CPAMC guest errors, including forged source URLs', () => {
+    for (const url of ['blob:file:///guest', 'data:text/html,guest', 'about:srcdoc']) {
+      expect(formatRendererConsoleLine('main', { level: 'error', message: 'provider-secret', sourceId: url, lineNumber: 1 })).toBeNull()
+      expect(formatRendererConsoleLine('main', { level: 'error', message: 'provider-secret',
+        sourceId: 'file:///app/spoofed.js', lineNumber: 1, frame: { url, parent: { url: 'file:///app/index.html' } } })).toBeNull()
+    }
+  })
 })
 
 describe('attachRendererConsoleCapture', () => {
@@ -100,4 +108,18 @@ describe('formatRendererBoundaryReport', () => {
     expect(report).toContain('[renderer crash:unknown] [error-boundary:unknown]')
     expect(report.length).toBeLessThan(7_000)
   })
+})
+
+it('capture persists only the native main frame when frame authority is available', () => {
+  const mainFrame = { url: 'file:///app/index.html' }
+  const log = vi.fn()
+  const on = vi.fn()
+  attachRendererConsoleCapture({ webContents: { mainFrame, on } }, 'main', log)
+  const listener = on.mock.calls[0][1]
+  const error = { level: 'error', message: 'private-provider-value', sourceId: 'file:///app/forged.js', lineNumber: 1 }
+  listener({ ...error, frame: { url: 'blob:file:///guest', parent: mainFrame } })
+  listener(error)
+  expect(log).not.toHaveBeenCalled()
+  listener({ ...error, message: 'trusted host failure', frame: mainFrame })
+  expect(log).toHaveBeenCalledExactlyOnceWith('[renderer console:main] trusted host failure (file:///app/forged.js:1)')
 })

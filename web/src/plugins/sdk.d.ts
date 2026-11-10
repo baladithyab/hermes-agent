@@ -76,6 +76,21 @@ export type BuildWsUrl = (
 /** Lower-level: just the ``[authParamName, authParamValue]`` pair. */
 export type BuildWsAuthParam = () => Promise<[string, string]>;
 
+/** Privilege-free resource presentation, separate from the console document. */
+export interface PluginResourceRequest {
+  documentId: string;
+  grantId: string;
+  entryPath: string;
+  /** Unix seconds, no more than five minutes from registration. */
+  expiresAt: number;
+}
+export interface PluginSession {
+  /** Relative plugin path; host fixes profile and acknowledged selection. */
+  fetchJSON: FetchJSON;
+  presentResource(request: PluginResourceRequest): Promise<{ url: string; close: () => Promise<void> }>;
+  close(): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Registry surface (window.__HERMES_PLUGINS__)
 // ---------------------------------------------------------------------------
@@ -138,6 +153,16 @@ export interface HermesPluginSDK {
    * specific methods they need. See ``web/src/lib/api.ts`` for the concrete shape.
    */
   api: Record<string, (...args: never[]) => unknown>;
+
+  /**
+   * Selected management profile, falling back to the dashboard's serving profile.
+   * Capture at mount and include it explicitly on profile-bound plugin requests.
+   * The host remounts the plugin when its profile context changes; pending work
+   * must retain its original captured profile, not read the new selection.
+   */
+  getManagementProfile: () => string;
+  /** Mount-scoped acknowledged selection; close after retiring owned leases. */
+  createPluginSession: (pluginName: string, capturedProfile: string) => PluginSession;
 
   /** JSON fetch with host auth handling. */
   fetchJSON: FetchJSON;

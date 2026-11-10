@@ -17,7 +17,7 @@ import React, {
   useContext,
   createContext,
 } from "react";
-import { api, fetchJSON, authedFetch, buildWsUrl, buildWsAuthParam } from "@/lib/api";
+import { api, fetchJSON, authedFetch, buildWsUrl, buildWsAuthParam, getManagementProfile } from "@/lib/api";
 import { cn, timeAgo, isoTimeAgo } from "@/lib/utils";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -38,6 +38,7 @@ import { Separator } from "@nous-research/ui/ui/components/separator";
 import { Tabs, TabsList, TabsTrigger } from "@nous-research/ui/ui/components/tabs";
 import { useI18n } from "@/i18n";
 import { clearPluginSlots, registerSlot, PluginSlot } from "./slots";
+import { createPluginSession } from "./session";
 
 // ---------------------------------------------------------------------------
 // Plugin registry — plugins call register() to add their component.
@@ -171,6 +172,10 @@ export function exposePluginSDK() {
 
     // Hermes API client
     api,
+    // Capture once when mounting a profile-bound plugin; carry it explicitly
+    // on later requests rather than consulting the current selection again.
+    getManagementProfile,
+    createPluginSession,
     // Raw fetchJSON for plugin-specific JSON endpoints
     fetchJSON,
     // Authenticated fetch for non-JSON endpoints (uploads / blob downloads).

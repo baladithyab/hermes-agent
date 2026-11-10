@@ -1,8 +1,8 @@
 """Wire format for the plugin host: framed JSON-RPC in both directions plus a value codec.
 
 Either side can call the other while a call is in flight (a host tool handler calling
-``ctx.dispatch_tool`` re-enters the parent), so every request is served on its own thread (nested
-re-entry can go arbitrarily deep; a bounded pool would deadlock) and every outgoing request made
+``ctx.dispatch_tool`` re-enters the parent), so each request is served on its own thread, with a bounded admission limit that
+fails closed rather than queuing recursive work into a deadlocked pool. Every outgoing request made
 while serving one names it as ``origin``. The origin is a ContextVar, so it follows the work onto
 event-loop tasks and ``to_thread`` hops. The parent uses that to run a
 nested request in the caller's contextvars (profile home, secret scope, session) instead of the
@@ -26,6 +26,9 @@ import inspect
 import itertools
 import json
 import logging
+import os
+import select
+import time
 import threading
 import types
 import typing
@@ -33,6 +36,8 @@ from collections import abc
 from concurrent.futures import Future
 from pathlib import PurePath
 from typing import Any, BinaryIO, Callable, Dict, Optional
+
+from hermes_cli.plugin_api_limits import DEFAULT_FRAME_BYTES, MAX_FRAME_BYTES, FrameLimits
 
 logger = logging.getLogger("hermes_cli.plugins")
 
@@ -50,6 +55,14 @@ class PluginHostError(RuntimeError):
 
 class PluginHostUnavailable(RuntimeError):
     """The channel is closed: the host process exited or was never started."""
+
+
+class PluginHostBusy(RuntimeError):
+    """Local admission refused before any request bytes were sent."""
+
+
+class PluginHostDeadline(TimeoutError):
+    """Local transport deadline, distinct from a remote plugin's TimeoutError."""
 
 
 class PluginHostUnsupported(RuntimeError):
@@ -299,13 +312,28 @@ class Channel:
     def __init__(self, reader: BinaryIO, writer: BinaryIO,
                  handler: Callable[[str, dict[str, Any], Optional[int]], Any], *, name: str,
                  on_close: Optional[Callable[[str], None]] = None,
-                 context_for_origin: Optional[Callable[[Optional[int]], contextvars.Context]] = None):
+                 context_for_origin: Optional[Callable[[Optional[int]], contextvars.Context]] = None,
+                 incoming_limits: Optional[Callable[[str, dict[str, Any]], FrameLimits]] = None):
         self._reader, self._writer = reader, writer
         self._handler, self._name, self._on_close = handler, name, on_close
         self._context_for_origin = context_for_origin
+        self._incoming_limits = incoming_limits
+        # Large calls retain their slot through reply consumption, not merely
+        # through the pipe write. Normal re-entrant callbacks keep their slots.
+        self._large_outgoing = threading.BoundedSemaphore(2)
+        self._large_incoming = threading.BoundedSemaphore(2)
         self._write_lock = threading.Lock()
+        self._incoming = threading.BoundedSemaphore(64)
+        self._writer_fd = None
+        if os.name == 'posix':
+            try:
+                self._writer_fd = writer.fileno()
+                os.set_blocking(self._writer_fd, False)
+            except (AttributeError, OSError, ValueError):
+                self._writer_fd = None
         self._ids = itertools.count(1)
         self._pending: dict[int, Future] = {}
+        self._pending_limits: dict[int, FrameLimits] = {}
         self._pending_lock = threading.Lock()
         self._contexts: dict[int, contextvars.Context] = {}
         self._closed_reason: Optional[str] = None
@@ -323,60 +351,159 @@ class Channel:
         """Caller context recorded when THIS side sent ``request_id`` (still in flight)."""
         return self._contexts.get(request_id) if request_id is not None else None
 
-    def request(self, method: str, params: dict[str, Any], *, timeout: Optional[float] = None) -> Any:
+    def request(self, method: str, params: dict[str, Any], *, timeout: Optional[float] = None,
+                frame_limits: FrameLimits = FrameLimits()) -> Any:
         if self._closed_reason is not None:
             raise PluginHostUnavailable(self._closed_reason)
+        if not isinstance(frame_limits, FrameLimits):
+            raise ValueError('invalid plugin frame limits')
+        large = frame_limits.extended
+        if large and not self._large_outgoing.acquire(blocking=False):
+            raise PluginHostBusy('plugin request not forwarded')
+        deadline = time.monotonic() + (30.0 if timeout is None else timeout)
         request_id = next(self._ids)
         future: Future = Future()
-        with self._pending_lock:
-            self._pending[request_id] = future
-        self._contexts[request_id] = contextvars.copy_context()
-        message = {"id": request_id, "method": method, "params": params,
-                   "origin": _SERVING.get()}
         try:
-            self._send(message)
-            return future.result(timeout=timeout)
+            with self._pending_lock:
+                if len(self._pending) >= 64:
+                    raise PluginHostBusy('plugin request not forwarded')
+                self._pending[request_id] = future
+                self._pending_limits[request_id] = frame_limits
+            self._contexts[request_id] = contextvars.copy_context()
+            message = {"id": request_id, "method": method, "params": params,
+                       "origin": _SERVING.get()}
+            self._send(message, deadline=deadline, max_bytes=frame_limits.request_bytes)
+            return future.result(timeout=None if timeout is None else max(0, deadline - time.monotonic()))
+        except TimeoutError as exc:
+            raise PluginHostDeadline('plugin RPC deadline; outcome unknown') from exc
         finally:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
+                self._pending_limits.pop(request_id, None)
             self._contexts.pop(request_id, None)
+            if large:
+                self._large_outgoing.release()
 
-    def _send(self, message: dict[str, Any]) -> None:
+    def _send(self, message: dict[str, Any], *, deadline=None,
+              max_bytes: int = DEFAULT_FRAME_BYTES) -> None:
         data = (json.dumps(message, separators=(",", ":"), allow_nan=True) + "\n").encode("utf-8")
-        with self._write_lock:
+        if len(data) > min(max_bytes, MAX_FRAME_BYTES):
+            raise ValueError('plugin frame too large')
+        deadline = time.monotonic() + 30 if deadline is None else deadline
+        if not self._write_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            raise TimeoutError('plugin channel write deadline')
+        try:
             if self._closed_reason is not None:
                 raise PluginHostUnavailable(self._closed_reason)
-            try:
+            if self._writer_fd is None:
                 self._writer.write(data)
                 self._writer.flush()
-            except (BrokenPipeError, OSError, ValueError) as exc:
-                self._close(f"{self._name} channel write failed: {exc}")
-                raise PluginHostUnavailable(self._closed_reason or str(exc)) from exc
+                return
+            view = memoryview(data)
+            while view:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([], [self._writer_fd], [], remaining)[1]:
+                    # A partial JSON frame cannot be safely reused or replayed.
+                    self._close('plugin channel write deadline')
+                    raise TimeoutError('plugin channel write deadline')
+                try:
+                    sent = os.write(self._writer_fd, view)
+                except BlockingIOError:
+                    continue
+                view = view[sent:]
+        except TimeoutError:
+            raise
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            self._close(f"{self._name} channel write failed: {type(exc).__name__}")
+            raise PluginHostUnavailable(self._closed_reason) from exc
+        finally:
+            self._write_lock.release()
+
+    def _read_frames(self):
+        # Popen uses unbuffered pipes. FileIO.readline() performs one read per
+        # byte; read chunks instead without introducing a buffered-close lock.
+        read = getattr(self._reader, 'read1', self._reader.read)
+        frame = bytearray()
+        while chunk := read(64 * 1024):
+            parts = chunk.split(b'\n')
+            for index, part in enumerate(parts):
+                if len(frame) + len(part) + 1 > MAX_FRAME_BYTES:
+                    raise ValueError('plugin frame too large')
+                frame.extend(part)
+                if index < len(parts) - 1:
+                    yield bytes(frame) + b'\n'
+                    frame.clear()
+        if frame:
+            raise ValueError('incomplete plugin frame')
 
     def _read_loop(self) -> None:
         reason = f"{self._name} channel closed"
         try:
-            for line in iter(self._reader.readline, b""):
+            for line in self._read_frames():
                 if not line.strip():
                     continue
                 try:
                     message = json.loads(line)
                 except ValueError:
-                    logger.warning("%s: dropped a malformed frame: %.200r", self._name, line)
+                    logger.warning("%s: dropped a malformed frame", self._name)
                     continue
+                if not isinstance(message, dict):
+                    reason = 'invalid plugin frame'
+                    break
                 if "method" in message:
-                    threading.Thread(target=self._serve, args=(message,), daemon=True,
+                    method, params = message["method"], message.get("params") or {}
+                    if not isinstance(method, str) or not isinstance(params, dict):
+                        reason = 'invalid plugin request'
+                        break
+                    limits = self._incoming_limits(method, params) if self._incoming_limits else FrameLimits()
+                    if len(line) > limits.request_bytes:
+                        reason = 'plugin frame too large'
+                        break
+                    large = limits.extended
+                    if large and not self._large_incoming.acquire(blocking=False):
+                        self._send({"id": message.get("id"), "error": {
+                            "type": "PluginHostBusy", "message": "plugin request not forwarded"}})
+                        continue
+                    if not self._incoming.acquire(blocking=False):
+                        if large:
+                            self._large_incoming.release()
+                        reason = 'plugin channel busy'
+                        break
+                    threading.Thread(target=self._serve_bounded, args=(message, limits), daemon=True,
                                      name=f"{self._name}-rpc").start()
                     continue
+                request_id = message.get("id")
+                if type(request_id) is not int:
+                    reason = 'invalid plugin response'
+                    break
                 with self._pending_lock:
-                    future = self._pending.get(message.get("id"))
+                    future = self._pending.get(request_id)
+                    limits = self._pending_limits.get(request_id, FrameLimits())
+                if len(line) > limits.response_bytes:
+                    reason = 'plugin frame too large'
+                    break
                 if future is not None and not future.done():
                     future.set_result(message)
-        except (OSError, ValueError) as exc:
-            reason = f"{self._name} channel read failed: {exc}"
+        except (OSError, ValueError, TypeError) as exc:
+            reason = f"{self._name} channel read failed: {type(exc).__name__}"
         self._close(reason)
 
-    def _serve(self, message: dict[str, Any]) -> None:
+    def _serve_bounded(self, message, limits):
+        released = False
+
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                if limits.extended:
+                    self._large_incoming.release()
+        try:
+            self._serve(message, limits, release)
+        finally:
+            release()
+            self._incoming.release()
+
+    def _serve(self, message: dict[str, Any], limits: FrameLimits, release=lambda: None) -> None:
         request_id = message.get("id")
         origin = message.get("origin")
         context = self._context_for_origin(origin) if self._context_for_origin else None
@@ -395,10 +522,13 @@ class Channel:
                 _SERVING.reset(token)
 
         reply = (context or contextvars.copy_context()).run(run)
+        # Retire invocation admission before publishing the reply. The peer can
+        # submit its next request as soon as it reads the terminating newline.
+        release()
         if request_id is None:
             return
         try:
-            self._send(reply)
+            self._send(reply, max_bytes=limits.response_bytes)
         except PluginHostUnavailable:
             pass
         except (TypeError, ValueError) as exc:  # unserializable result slipped past encode()
@@ -409,8 +539,9 @@ class Channel:
             raise_remote(reply["error"])
         return reply.get("result")
 
-    def call(self, method: str, params: dict[str, Any], *, timeout: Optional[float] = None) -> Any:
-        return self.result_of(self.request(method, params, timeout=timeout))
+    def call(self, method: str, params: dict[str, Any], *, timeout: Optional[float] = None,
+             frame_limits: FrameLimits = FrameLimits()) -> Any:
+        return self.result_of(self.request(method, params, timeout=timeout, frame_limits=frame_limits))
 
     def _close(self, reason: str) -> None:
         with self._pending_lock:

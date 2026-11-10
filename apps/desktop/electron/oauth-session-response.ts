@@ -19,12 +19,15 @@ export interface WireOauthResponseOptions {
   reject: (error: Error) => void
   /** Observe the response's `Set-Cookie` header(s) at wire time (#61457). */
   onSetCookies?: (setCookie: string | string[] | undefined) => void
+  maxResponseBytes?: number
+  abort?: () => void
 }
 
 export function wireOauthSessionResponse(res: OauthResponseLike, opts: WireOauthResponseOptions): void {
   const { url, isTimedOut, clearTimer, resolve, reject } = opts
   const chunks: Buffer[] = []
   let settled = false
+  let received = 0
 
   // Headers exist the moment the response event fires — capture before the
   // body drains so a fast body can't race the capture.
@@ -36,6 +39,15 @@ export function wireOauthSessionResponse(res: OauthResponseLike, opts: WireOauth
 
   res.on('data', chunk => {
     if (!settled && !isTimedOut()) {
+      received += chunk.length
+      if (opts.maxResponseBytes !== undefined && received > opts.maxResponseBytes) {
+        settled = true
+        chunks.length = 0
+        clearTimer()
+        reject(new Error('Bounded plugin response is too large'))
+        opts.abort?.()
+        return
+      }
       chunks.push(Buffer.from(chunk))
     }
   })

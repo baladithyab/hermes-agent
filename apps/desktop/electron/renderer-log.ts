@@ -15,16 +15,24 @@
  * tokens or PII we never want on disk.
  */
 
+import { isPluginResourceUrl, redactPluginResourceUrls } from './plugin-resource-contract'
+
 type ConsoleMessageLevel = 'info' | 'warning' | 'error' | 'debug'
+
+interface ConsoleFrameLike {
+  url: string
+  parent?: ConsoleFrameLike | null
+}
 
 interface ConsoleMessageEventLike {
   level?: unknown
   message?: unknown
   sourceId?: unknown
   lineNumber?: unknown
+  frame?: ConsoleFrameLike | null
 }
 
-interface ConsoleMessageDetails {
+interface ConsoleMessageDetails extends ConsoleMessageEventLike {
   level: ConsoleMessageLevel
   message: string
   sourceId: string
@@ -32,6 +40,7 @@ interface ConsoleMessageDetails {
 }
 
 interface WebContentsLike {
+  mainFrame?: ConsoleFrameLike
   on(event: 'console-message', listener: (event: ConsoleMessageEventLike) => void): unknown
 }
 
@@ -68,8 +77,21 @@ export function formatRendererConsoleLine(label: string, details: ConsoleMessage
   if (!isConsoleMessageDetails(details) || details.level !== 'error') {
     return null
   }
+  // Resource pages are third-party documents, not the trusted renderer. Their
+  // console may contain provider secrets even when their own source URL is safe.
+  if (isPluginResourceUrl(details.sourceId)) return null
+  if (/^(?:data:|blob:|about:)/i.test(details.sourceId)) return null
+  // sourceId can be forged with //# sourceURL. Electron's frame ancestry is
+  // the authority, including about:blank descendants of the resource wrapper.
+  try {
+    for (let frame = details.frame, depth = 0; frame; frame = frame.parent, depth += 1) {
+      if (depth >= 64 || isPluginResourceUrl(frame.url) || /^(?:data:|blob:|about:)/i.test(frame.url)) return null
+    }
+  } catch {
+    return null // A detached frame must not leak its third-party console.
+  }
 
-  return `[renderer console:${label}] ${details.message} (${details.sourceId}:${String(details.lineNumber)})`
+  return redactPluginResourceUrls(`[renderer console:${label}] ${details.message} (${details.sourceId}:${String(details.lineNumber)})`)
 }
 
 /** Attach the error-level console hook to a renderer window. `log` is the
@@ -84,6 +106,10 @@ export function attachRendererConsoleCapture(win: WindowLike, label: string, log
 
       return
     }
+    // Persist only an attributable host-frame error. Source URLs can be
+    // forged, and opaque guests may omit a usable source URL altogether.
+    const mainFrame = win.webContents.mainFrame
+    if (mainFrame && event.frame !== mainFrame) return
 
     const formatted = formatRendererConsoleLine(label, event)
 

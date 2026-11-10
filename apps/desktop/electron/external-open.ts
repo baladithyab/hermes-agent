@@ -142,9 +142,11 @@ export async function openExternalUrl(rawUrl: string, deps: ExternalOpenDeps): P
 }
 
 async function openViaWsl(url: string, deps: ExternalOpenDeps): Promise<ExternalOpenResult> {
-  deps.log(`[link] opening via WSL→Windows: ${url}`)
+  // OAuth URLs carry state, codes and fragments. Log the route, never its
+  // arguments; the OS browser and the user-visible failure dialog keep them.
+  deps.log('[link] opening via WSL→Windows')
 
-  const proc = deps.spawn('cmd.exe', ['/c', 'start', '""', url], {
+  const proc = deps.spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true
@@ -153,8 +155,9 @@ async function openViaWsl(url: string, deps: ExternalOpenDeps): Promise<External
   // 'error' only fires when the process could not be spawned. In that case
   // fall back to xdg-open; if that also fails, surface it. The handler runs
   // asynchronously after this function has already resolved.
-  proc.on('error', error => {
-    deps.log(`[link] cmd.exe start failed: ${error.message}; falling back to xdg-open`)
+  proc.on('error', () => {
+    // Spawn errors can echo argv, including the complete authorization URL.
+    deps.log('[link] Windows URI handler failed; falling back to xdg-open')
 
     deps.openExternal(url).catch(openError => {
       failOpen(deps, url, openError)
@@ -172,7 +175,7 @@ async function openViaWsl(url: string, deps: ExternalOpenDeps): Promise<External
 
 function failOpen(deps: ExternalOpenDeps, url: string, error: unknown): ExternalOpenResult {
   const message = externalOpenErrorMessage(error)
-  deps.log(`[link] openExternal failed: ${message}`)
+  deps.log('[link] openExternal failed')
   deps.notifyFailure(url, message)
 
   return { ok: false, reason: 'failed', message }

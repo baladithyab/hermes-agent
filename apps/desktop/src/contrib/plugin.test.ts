@@ -123,3 +123,30 @@ describe('createPluginContext.os', () => {
     }
   })
 })
+
+describe('createPluginContext.os.saveFile', () => {
+  it('is feature-detectably absent on an older shell', () => {
+    expect(createPluginContext('exporter').os.saveFile).toBeUndefined()
+  })
+
+  it('passes bounded bytes to the explicit save capability and preserves cancellation and failures', async () => {
+    const savePluginFile = vi.fn().mockResolvedValue({ status: 'cancelled' })
+    vi.stubGlobal('hermesDesktop', { savePluginFile })
+    try {
+      const save = createPluginContext('exporter').os.saveFile!
+      const request = { suggestedFilename: 'credentials.json', bytes: new ArrayBuffer(32 * 1024 * 1024) }
+      await expect(save(request)).resolves.toEqual({ status: 'cancelled' })
+      expect(savePluginFile).toHaveBeenCalledWith(request)
+      savePluginFile.mockResolvedValue({ status: 'saved' })
+      await expect(save(request)).resolves.toEqual({ status: 'saved' })
+      savePluginFile.mockRejectedValue(new Error('disk full'))
+      await expect(save(request)).rejects.toThrow('disk full')
+      savePluginFile.mockClear()
+      await expect(save({ suggestedFilename: '../escape', bytes: new ArrayBuffer(0) })).rejects.toThrow()
+      await expect(save({ suggestedFilename: 'too-large.bin', bytes: new ArrayBuffer(32 * 1024 * 1024 + 1) })).rejects.toThrow()
+      expect(savePluginFile).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

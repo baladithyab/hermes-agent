@@ -14,6 +14,9 @@
 
 import type { ReadableAtom } from 'nanostores'
 
+import { presentPluginResource } from '@/api/plugins'
+import { createPluginSession } from '@/api/plugin-session'
+import type { PluginSession } from '@/api/plugin-session'
 import { pluginRest, type PluginRestOptions, pluginSocket } from '@/hermes'
 import { createPluginI18n, type PluginI18n } from '@/i18n'
 import {
@@ -28,6 +31,8 @@ import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } 
 import { $petActive } from '@/store/pet'
 import { clearPetMessages, type PetSayOptions, sayPetMessage } from '@/store/pet-plugin-messages'
 
+import { parsePluginFileSaveRequest, type PluginFileSaveRequest, type PluginFileSaveResult } from '../../electron/plugin-file-save-contract'
+import type { PluginResourceRequest, PluginResourcePresentation } from '../../electron/plugin-resource-contract'
 import { type GatewayEventListener, onGatewayEvent } from './events'
 import { createPluginFiles, type PluginFiles } from './plugin-files'
 import { createPluginPreview, type PluginPreview } from './plugin-preview'
@@ -37,6 +42,9 @@ import { type PluginSettingsPage, settingsPageContribution } from './settings-pa
 
 export type { PluginFileEntry, PluginFiles, PluginFilesResult, PluginFolder } from './plugin-files'
 export type { PluginPreview } from './plugin-preview'
+export type { PluginSession, PluginSessionOptions } from '@/api/plugin-session'
+export type { PluginFileSaveRequest, PluginFileSaveResult } from '../../electron/plugin-file-save-contract'
+export type { PluginResourceRequest, PluginResourcePresentation } from '../../electron/plugin-resource-contract'
 import type { Contribution } from './types'
 
 export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'
@@ -60,9 +68,8 @@ export interface PluginStorage {
 
 /** The curated OS door — every way a plugin reaches outside the app window,
  *  in one attributed namespace instead of the raw `window.hermesDesktop`
- *  bridge. Every member resolves a result instead of throwing when the
- *  capability can't apply (no Electron shell, older desktop build), so
- *  callers branch on the return value rather than sniffing the bridge. */
+ *  bridge. Missing capabilities return false/null, or are absent for newer
+ *  optional methods. Save failures reject rather than masquerading as cancel. */
 export interface PluginOs {
   /** Native OS notification (Electron), attributed to this plugin. Gated by
    *  Settings ▸ Notifications ▸ "Plugin notifications" and fires only while
@@ -81,6 +88,13 @@ export interface PluginOs {
    *  when unavailable. The path is on the BACKEND's filesystem, so hand it
    *  to a `rest` call rather than trying to write it from the renderer. */
   pickSavePath: (options?: PluginFileDialogOptions) => Promise<null | string>
+  /** Save up to 32 MiB of bytes on this machine. The native Save dialog owns
+   *  the destination and overwrite consent. No filesystem path is returned.
+   *  Absent on older hosts; validation/dialog/write failures reject. */
+  saveFile?: (request: PluginFileSaveRequest) => Promise<PluginFileSaveResult>
+  /** Separate opaque resource frame, bound to selectionBound REST's owner.
+   * Absent on older hosts; no management credentials or console port exposed. */
+  presentPluginResource?: (request: PluginResourceRequest) => Promise<PluginResourcePresentation>
   /** Native open dialog, single file. Resolves the chosen path, or null on
    *  cancel / when unavailable. */
   pickOpenPath: (options?: PluginFileDialogOptions) => Promise<null | string>
@@ -152,6 +166,8 @@ export interface PluginContext {
    *  `plugin_api.py` — profile-aware, namespace-scoped by construction. Use
    *  `host.request` for gateway JSON-RPC. */
   rest: <T>(path: string, opts?: PluginRestOptions) => Promise<T>
+  /** Terminal mount session. Retire owned leases before its captured selection. */
+  createPluginSession: () => PluginSession
   /** Live twin of `rest`: a WebSocket to this plugin's own namespace
    *  ('/events'), JSON frames to `onMessage`, auto-reconnect, disposer
    *  returned. Resolves to a no-op on OAuth remotes — treat it as an
@@ -233,10 +249,9 @@ function createPluginStorage(pluginId: string): PluginStorage {
   }
 }
 
-// Never throws for a missing capability: the renderer can outlive an older
-// Electron shell (or run in a plain browser), so every door degrades to a
-// false result the plugin can branch on.
-function createPluginOs(pluginId: string): PluginOs {
+// The renderer can outlive an older Electron shell or run in a browser.
+// Existing doors retain their false/null fallback; saveFile is feature-detected.
+function createPluginOs(pluginId: string, track: (dispose: () => void) => () => void): PluginOs {
   const attempt = async (run: (bridge: NonNullable<typeof window.hermesDesktop>) => Promise<boolean>) => {
     const bridge = typeof window === 'undefined' ? undefined : window.hermesDesktop
 
@@ -266,7 +281,36 @@ function createPluginOs(pluginId: string): PluginOs {
     }
   }
 
+  const saveFile = typeof window === 'undefined' ? undefined : window.hermesDesktop?.savePluginFile
+  const resourceSupported = typeof window !== 'undefined' && window.hermesDesktop?.presentPluginResource && window.hermesDesktop?.closePluginResource
+  const resources = new Set<() => Promise<void>>()
+  let tracked = false
+  let disposed = false
   return {
+    ...(saveFile ? {
+      saveFile: async (request: PluginFileSaveRequest) => saveFile(parsePluginFileSaveRequest(request))
+    } : {}),
+    ...(resourceSupported ? {
+      presentPluginResource: async (request: PluginResourceRequest): Promise<PluginResourcePresentation> => {
+        if (disposed) throw new Error('RESOURCE_REVOKED')
+        if (!tracked) {
+          tracked = true
+          track(() => {
+            disposed = true
+            for (const close of resources) void close().catch(() => undefined)
+            resources.clear()
+          })
+        }
+        const resource = await presentPluginResource(pluginId, request)
+        if (disposed) {
+          await resource.close().catch(() => undefined)
+          throw new Error('RESOURCE_REVOKED')
+        }
+        const close = () => { resources.delete(close); return resource.close() }
+        resources.add(close)
+        return { url: resource.url, close }
+      }
+    } : {}),
     notify: input => dispatchPluginNativeNotification(pluginId, input),
     openExternal: url =>
       attempt(async bridge => {
@@ -394,8 +438,13 @@ export function createPluginContext(
     onEvent: (type, listener) => track(onGatewayEvent(type, listener)),
     ...createPluginLifetime(track),
     rest: <T>(path: string, opts?: PluginRestOptions) => pluginRest<T>(pluginId, path, opts),
+    createPluginSession: () => {
+      const session = createPluginSession(pluginId)
+      track(() => { void session.close().catch(() => undefined) })
+      return session
+    },
     socket: (path, onMessage) => track(pluginSocket(pluginId, path, onMessage)),
-    os: createPluginOs(pluginId),
+    os: createPluginOs(pluginId, track),
     pet: createPluginPet(pluginId, track),
     runAction: id => runPluginAppAction(pluginId, id),
     listActions: listPluginAppActions,

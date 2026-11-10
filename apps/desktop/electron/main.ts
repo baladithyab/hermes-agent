@@ -15,6 +15,10 @@ import os from 'node:os'
 import path from 'node:path'
 import tls from 'node:tls'
 import { pathToFileURL } from 'node:url'
+import { pluginSelectionHeaders } from './plugin-selection'
+import { PLUGIN_RESOURCE_SCHEME, redactPluginResourceUrls } from './plugin-resource-contract'
+import { PluginResourcePresentations } from './plugin-resource-presentation'
+import { registerPluginTransportIpc } from './plugin-transport-ipc'
 
 import {
   app,
@@ -1799,7 +1803,12 @@ app.setAboutPanelOptions({
 // from this machine; remote paths are proxied through the configured gateway
 // with main-process authentication. This avoids whole-file data URLs and keeps
 // playback seekable and Range-aware. Must be registered before app readiness.
+const pluginResourcePresentations = new PluginResourcePresentations()
 protocol.registerSchemesAsPrivileged([
+  {
+    scheme: PLUGIN_RESOURCE_SCHEME,
+    privileges: { secure: true, standard: true, stream: true, supportFetchAPI: true, corsEnabled: true }
+  },
   {
     scheme: MEDIA_PROTOCOL,
     privileges: {
@@ -2116,7 +2125,7 @@ function scheduleDesktopLogFlush() {
 }
 
 function rememberLog(chunk) {
-  const text = String(chunk || '').trim()
+  const text = redactPluginResourceUrls(String(chunk || '').trim())
 
   if (!text) {
     return
@@ -2332,7 +2341,7 @@ async function openLocalFilesystemPath(rawPath: string): Promise<boolean> {
 // dialog can show accurate localized copy instead of the generic one.
 // Broadcast to every window — the trigger has no single sender.
 function broadcastOpenFailed(url: string, message: string, code?: 'missing-file') {
-  rememberLog(`[open-failed] ${url}: ${message}`)
+  rememberLog(`[open-failed] ${code || 'external-open-failed'}`)
 
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('hermes:external-open-failed', { url, message, ...(code ? { code } : {}) })
@@ -5232,10 +5241,25 @@ function fetchJson(url, token, options: any = {}) {
             }
           },
           res => {
-            const chunks = []
+            const chunks: Buffer[] = []
+            let received = 0
+            let oversized = false
             res.on('error', reject)
-            res.on('data', chunk => chunks.push(chunk))
+            res.on('data', chunk => {
+              if (oversized) return
+              received += chunk.length
+              if (options.maxResponseBytes !== undefined && received > options.maxResponseBytes) {
+                oversized = true
+                chunks.length = 0
+                const error = new Error('Bounded plugin response is too large')
+                reject(error)
+                req.destroy(error)
+                return
+              }
+              chunks.push(chunk)
+            })
             res.on('end', () => {
+              if (oversized) return
               const text = Buffer.concat(chunks).toString('utf8')
 
               if ((res.statusCode || 500) >= 400) {
@@ -5298,7 +5322,7 @@ function fetchJson(url, token, options: any = {}) {
         req.end()
       })
     },
-    { method: options.method || 'GET' }
+    { method: options.method || 'GET', maxRetries: options.singleAttempt ? 0 : undefined }
   )
 }
 
@@ -7219,7 +7243,7 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
         url,
         session: sess,
         useSessionCookies: true,
-        redirect: 'follow'
+        redirect: options.singleAttempt ? 'error' : 'follow'
       } as any)
 
       setJsonRequestHeaders(request)
@@ -7259,6 +7283,8 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
           clearTimer: (): void => clearTimeout(timer),
           resolve,
           reject,
+          maxResponseBytes: options.maxResponseBytes,
+          abort: () => request.abort(),
           onSetCookies: setCookie => remoteSessionCookies.record(partition, url, setCookie)
         })
       })
@@ -15156,7 +15182,8 @@ async function getJsonForBackend(descriptor, path, opts: any = {}) {
 async function fetchJsonForBackend(
   descriptor,
   path,
-  opts: { method?: string; body?: unknown; upload?: unknown; timeoutMs?: number; profileScoped?: boolean } = {}
+  opts: { method?: string; body?: unknown; upload?: unknown; timeoutMs?: number; profileScoped?: boolean;
+    headers?: Record<string, string>; singleAttempt?: boolean; maxResponseBytes?: number } = {}
 ) {
   const url = `${descriptor.baseUrl}${path}`
 
@@ -15193,7 +15220,9 @@ async function fetchJsonForBackend(
       method: opts.method,
       body: opts.body,
       timeoutMs: opts.timeoutMs,
-      headers: descriptor.headers
+      singleAttempt: opts.singleAttempt,
+      maxResponseBytes: opts.maxResponseBytes,
+      headers: { ...descriptor.headers, ...opts.headers }
     }
 
     return requestWithOauthFallback(descriptor.baseUrl, {
@@ -15208,7 +15237,9 @@ async function fetchJsonForBackend(
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
-    headers: descriptor.headers,
+    headers: { ...descriptor.headers, ...opts.headers },
+    singleAttempt: opts.singleAttempt,
+    maxResponseBytes: opts.maxResponseBytes,
     gatewayDescriptor: descriptor.gatewayEndpoint ? descriptor : undefined
   })
 }
@@ -15927,7 +15958,8 @@ async function dispatchRegistryApiRequest(
     method: request?.method,
     body: request?.body,
     upload: request?.upload,
-    timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS),
+    headers: pluginSelectionHeaders(requestPath, request?.pluginSelection)
   })
 
   desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response, connection.mode)
@@ -16031,7 +16063,8 @@ async function handleHermesApiRequest(request) {
       method: request?.method,
       body: request?.body,
       upload: request?.upload,
-      timeoutMs
+      timeoutMs,
+      headers: pluginSelectionHeaders(apiRoute.requestPath, request?.pluginSelection)
     })
 
     response = connection.gatewayEndpoint
@@ -16132,6 +16165,31 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     flushDesktopLogBufferSync()
 
     throw error
+  }
+})
+
+registerPluginTransportIpc({
+  presentations: pluginResourcePresentations,
+  isTrustedWindow: window => chatWindows.has(window),
+  rendererUrl: () => DEV_SERVER || pathToFileURL(resolveRendererIndex()).toString(),
+  capture: async (owner, path) => {
+    const routed = { ...owner, method: 'POST', path }
+    const registryId = apiRequestRegistryConnectionId(routed)
+    const route = resolveProfileApiRequest(owner.profile, path, profileRouteOptions(owner.profile, routed))
+    const connection = registryId
+      ? await backendDialClaims.run(backendScopeKey(registryId, owner.profile), () => ensureRegistryBackend(registryId, owner.profile))
+      : await ensureBackend(route.backendProfile, { request: { method: 'POST', path } })
+    const captured = {
+      ...connection,
+      headers: { ...connection.headers },
+      ...(connection.gatewayEndpoint ? {
+        gatewayEndpoint: { ...connection.gatewayEndpoint, capabilities: [...connection.gatewayEndpoint.capabilities] }
+      } : {})
+    }
+    return {
+      requestPath: registryId ? pathForRegistryBackendRequest(path, owner.profile, captured, 'POST') : route.requestPath,
+      invoke: (requestPath, options) => withoutInteractiveOauthLogin(() => fetchJsonForBackend(captured, requestPath, options))
+    }
   }
 })
 
@@ -17748,6 +17806,7 @@ app.whenReady().then(() => {
   installMediaPermissions()
   installDownloadHandling()
   registerMediaProtocol()
+  protocol.handle(PLUGIN_RESOURCE_SCHEME, request => pluginResourcePresentations.handle(request))
   installEmbedReferer()
   installRemoteHeaderRules()
 

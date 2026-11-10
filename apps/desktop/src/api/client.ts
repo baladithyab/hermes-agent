@@ -6,9 +6,9 @@ import {
   type ServerRequest,
   type ServerRequestHandler
 } from '@hermes/shared'
-import { map, type MapStore } from 'nanostores'
+import { atom, map, type MapStore } from 'nanostores'
 
-import type { HermesApiRequest } from '@/global'
+import type { HermesApiRequest, HermesConnection } from '@/global'
 
 import { CanonicalDesktopProtocol, canonicalProfile, canonicalPromptParams, canonicalSessionKey, openGatewaySocket, recordCanonicalOwner, splitRewindSubmit } from './canonical-protocol'
 import { DialReadiness, GATEWAY_NOT_CONNECTED_MESSAGE, remainingRequestBudget } from './dial-readiness'
@@ -619,6 +619,18 @@ interface ApiRequestScope {
 
 // This is the request authority, not a second copy in a presentation store.
 export const $apiRequestScope: MapStore<ApiRequestScope> = map<ApiRequestScope>({ profile: null, connectionId: null })
+
+// A registry id may stay unchanged while its resolved backend is replaced.
+// Keep the comparison private; consumers observe only a credential-free epoch.
+export const $apiBackendRevision = atom(0)
+let backendIdentity = ''
+export function setApiRequestBackend(connection: Pick<HermesConnection, 'baseUrl' | 'token' | 'mode' | 'authMode' | 'remoteIdentity'> | null): void {
+  if (!connection) return
+  const identity = JSON.stringify([connection.baseUrl, connection.mode, connection.authMode, connection.remoteIdentity, connection.token])
+  if (identity === backendIdentity) return
+  backendIdentity = identity
+  $apiBackendRevision.set($apiBackendRevision.get() + 1)
+}
 
 export function setApiRequestProfile(profile: null | string): void {
   $apiRequestScope.setKey('profile', profile || null)

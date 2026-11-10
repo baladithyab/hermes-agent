@@ -337,6 +337,78 @@ The model only ever sees the names and descriptions you configured, never raw pr
 Listing a profile in `delegation.backends.profile_routes` lets this profile's subagents use that profile's credentials, credential pool, `SOUL.md` and terminal policy. Only list profiles whose keys and terminal access you are happy for this profile's agent to use.
 :::
 
+### Fork caller migration: explicit model/provider choices
+
+This fork supplies the `explicit-routing` delegation backend through the same
+upstream provider interface. Select `delegation.backend: explicit-routing` to
+let a caller choose an exact provider/model pair for each task. The operator
+must authorize each pair in the owning profile's configuration; an empty or
+missing allowlist denies all explicit choices:
+
+```yaml
+delegation:
+  backend: explicit-routing
+  backends:
+    explicit-routing:
+      allowed:
+        - provider: custom:local-a
+          model: local-model
+        - provider: custom:local-b
+          model: other-local-model
+```
+
+The providers and models must also exist in that profile's offline inventory:
+its provider catalog, or a configured custom provider's `models`, `model` or
+`default_model`. Disabled providers and unknown models are refused. Configure
+provider credentials and endpoints through the existing provider setup. They
+are resolved in the activity's owning profile, never supplied by the task.
+
+Migrate the old fork's top-level `model`/`provider` arguments and raw per-task
+`model`/`provider` fields into **each affected task's `route` object**. A previous
+top-level choice must be repeated for every task to which it applied; a
+per-task choice becomes that task's own object:
+
+```json
+{
+  "tasks": [
+    {
+      "goal": "Analyze the first module",
+      "route": {
+        "provider": "custom:local-a",
+        "model": "local-model",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "goal": "Check the second module",
+      "route": {"provider": "custom:local-b", "model": "other-local-model"}
+    }
+  ]
+}
+```
+
+Both `provider` and `model` are required for an explicit selection. Only the
+optional `reasoning_effort` may accompany them; unsupported effort, credential,
+endpoint, profile and other extra fields refuse the task. A model ID that stays
+the same can still request a different supported effort. Omitted or `null`
+`route` preserves ordinary `delegation.*` behavior, including normal inheritance.
+Core reserved task-field validation remains unchanged; legacy raw arguments
+are no longer a routing interface and must be migrated by callers.
+
+For explicit selections, a configured `delegation.fallback_providers` list is
+preserved only when **every** entry is an allowed, known provider/model pair
+with optional supported `reasoning_effort`. Malformed or unauthorized fallback
+entries refuse the task instead of silently dropping policy. Fallback endpoint,
+key, profile and request-override fields are refused; move such settings to
+their owning provider before migration. An absent chain or `[]` gives an explicit
+selection no fallback, and never borrows the parent's fallback chain. Explicit
+choices also do not borrow `delegation.base_url`, `delegation.api_key`, or another
+route's request overrides.
+
+The plugin schema is deterministic and performs no credential minting or HTTP
+discovery. Backend switching follows the existing next-session/cache rules
+above. Global plugin isolation does not need to change.
+
 ## The `/review` Command
 
 `/review` spawns an independent, full-privilege background subagent whose only job is to review the work your conversation just produced — a PR, a diff, code, documentation, a design. It works on every surface: CLI, TUI, the Desktop app, and every gateway messaging platform.

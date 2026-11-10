@@ -4291,7 +4291,13 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         self, chat_id: str, question: str, choices: Optional[list], clarify_id: str, session_key: str,
         metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Render a clarify prompt: numbered buttons per choice plus "✏️ Other (type answer)" (flips to
-        text-capture mode); without choices, plain question and the gateway text-intercept captures."""
+        text-capture mode); without choices, plain question and the gateway text-intercept captures.
+        Multi-select prompts use numbered text because inline buttons submit immediately."""
+        if choices:
+            from tools.clarify_gateway import get_pending
+            if getattr(get_pending(clarify_id), "multi_select", False):
+                return await super().send_clarify(chat_id, question, choices, clarify_id, session_key, metadata)
+
         def build():
             text = f"❓ {_html.escape(question)}"
             keyboard = None

@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
 import type { DesktopProfileRoute } from './desktop-profile'
 import type { HudModifierApi, HudModifierStatus } from './hud-modifier-types'
+import { parsePluginFileSaveRequest, type PluginFileSaveRequest } from './plugin-file-save-contract'
+import type { PluginResourceBridgeRequest } from './plugin-resource-contract'
+import type { PluginSessionOpen, PluginSessionCall } from './plugin-session-contract'
 import { customWindowControlsEnabled } from './window-controls'
 
 // Which translucency the OS can back. Asked synchronously because the renderer
@@ -445,6 +448,15 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   endPreviewGuestActivity: token => ipcRenderer.invoke('hermes:preview-guest-activity:end', token),
   executePreviewGuestScript: (token, code) => ipcRenderer.invoke('hermes:preview-guest-activity:script', token, code),
   openExternal: url => ipcRenderer.invoke('hermes:openExternal', url),
+  savePluginFile: (request: PluginFileSaveRequest) =>
+    ipcRenderer.invoke('hermes:plugin:saveFile', parsePluginFileSaveRequest(request)),
+  presentPluginResource: (request: PluginResourceBridgeRequest) => ipcRenderer.invoke('hermes:plugin:resource:open', request),
+  closePluginResource: (handleId: string) => ipcRenderer.invoke('hermes:plugin:resource:close', handleId),
+  pluginSession: {
+    open: (request: PluginSessionOpen) => ipcRenderer.invoke('hermes:plugin:session:open', request),
+    call: (handle: string, request: PluginSessionCall) => ipcRenderer.invoke('hermes:plugin:session:call', handle, request),
+    close: (handle: string) => ipcRenderer.invoke('hermes:plugin:session:close', handle)
+  },
   freeTierChallenge: {
     // Load the account service's challenge page in a hidden window (revealed
     // only if the page asks for the human). Resolves with how it ended.

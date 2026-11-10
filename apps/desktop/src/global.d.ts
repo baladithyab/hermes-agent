@@ -7,6 +7,9 @@ import type { ScreenshotApi } from '../electron/command-screenshot-types'
 import type { HudModifierApi } from '../electron/hud-modifier-types'
 import type { MachineProfile } from '../electron/machine-profile'
 import type { HermesNotification } from '../electron/notification-types'
+import type { PluginFileSaveRequest, PluginFileSaveResult } from '../electron/plugin-file-save-contract'
+import type { PluginResourceBridgeRequest, PluginResourceBridgeResult } from '../electron/plugin-resource-contract'
+import type { PluginSessionBridge } from '../electron/plugin-session-contract'
 import type { KeepAwakeMode } from '../electron/power-save'
 import type { UpdateHoldWire } from '../electron/update-hold-types'
 import type { UpdateRunReport } from '../electron/updater/update-metrics'
@@ -457,6 +460,11 @@ declare global {
       endPreviewGuestActivity?: (token: number) => Promise<void>
       executePreviewGuestScript?: (token: number, code: string) => Promise<unknown>
       openExternal: (url: string) => Promise<void>
+      /** Bounded bytes to an OS Save dialog, never a caller-selected path. */
+      savePluginFile?: (request: PluginFileSaveRequest) => Promise<PluginFileSaveResult>
+      presentPluginResource?: (request: PluginResourceBridgeRequest) => Promise<PluginResourceBridgeResult>
+      closePluginResource?: (handleId: string) => Promise<void>
+      pluginSession?: PluginSessionBridge
       onExternalOpenFailed?: (callback: (payload: ExternalOpenFailedPayload) => void) => () => void
       /** The free tier's browser challenge (electron/challenge-window.ts): load
        *  the account service's page in a hidden window, revealed only if the
@@ -1646,6 +1654,7 @@ export type DesktopBootstrapEvent =
     }
 
 export interface HermesApiRequest {
+  pluginSelection?: { client: string; scope?: string; epoch: number }
   path: string
   method?: string
   body?: unknown

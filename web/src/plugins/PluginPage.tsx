@@ -8,10 +8,12 @@ import {
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 import type { Translations } from "@/i18n/types";
+import { useProfileScope } from "@/contexts/useProfileScope";
 
 /** Renders a plugin tab once its bundle has called `register()`. */
 export function PluginPage({ name }: { name: string }) {
   const { t } = useI18n();
+  const { profile, currentProfile } = useProfileScope();
   // Subscribe in render (via useSyncExternalStore) so we never miss
   // `register()` if the script loads before a useEffect would run.
   const Component = useSyncExternalStore(
@@ -26,7 +28,7 @@ export function PluginPage({ name }: { name: string }) {
   );
 
   if (Component) {
-    return <Component />;
+    return <Component key={JSON.stringify([name, profile, currentProfile])} />;
   }
 
   if (loadError) {

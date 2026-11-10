@@ -36,8 +36,9 @@ import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from hermes_cli.plugin_api_limits import FrameLimits, load_plugin_api_limits
 from hermes_cli.plugin_host_wire import (
-    Channel, Opaque, PluginHostUnavailable, PluginHostUnsupported, declared_return, decode, encode, restore,
+    Channel, Opaque, PluginHostDeadline, PluginHostUnavailable, PluginHostUnsupported, declared_return, decode, encode, restore,
     signature_from,
 )
 
@@ -71,6 +72,8 @@ def _hosted_ambient_credentials(home: Path) -> dict[str, str]:
 
 class PluginHost:
     """One host process for one :class:`~hermes_cli.plugins.PluginManager` (one profile home)."""
+    supports_hosted_native_cli = True
+
 
     def __init__(self, manager: Any):
         self._manager = manager
@@ -84,12 +87,18 @@ class PluginHost:
         self._base_context = self._build_base_context()
         self._loading: Optional[str] = None
         self._stopping = False
+        self._deadline_failed = False
         self._deaths: list = []
         # Bumped per host process: a proxy made for an earlier process must not address this one
         # (object ids restart at 1, so a stale id would silently land on a different object).
         self._generation = 0
         self._releases: list = []
         self.info: dict[str, Any] = {}
+        from hermes_cli.plugin_operation_authority import RequestOperations
+        from hermes_cli.plugin_request_context import _AUTHORITY
+        self._request_operations = RequestOperations(_AUTHORITY)
+        self._native_cli_outputs: dict[str, tuple] = {}
+        self._large_asgi = threading.BoundedSemaphore(2)
 
     # -- lifecycle ----------------------------------------------------------------------------------
     @property
@@ -137,6 +146,8 @@ class PluginHost:
 
     def ensure_started(self) -> Channel:
         with self._lock:
+            if self._deadline_failed:
+                raise PluginHostUnavailable('plugin RPC deadline; explicit host replacement required')
             if self.alive:
                 return self._channel  # type: ignore[return-value]
             self._stopping = False
@@ -173,6 +184,11 @@ class PluginHost:
                 f"its plugins automatically" if code is not None else "the plugin host is not running")
 
     def _on_channel_close(self, generation: int, reason: str) -> None:
+        if generation == self._generation and 'deadline' in reason:
+            # A partial outbound frame is also an ambiguous operation. The
+            # caller contains the captured process; never race it with restart.
+            self._deadline_failed = True
+            self._stopping = True
         if self._stopping or generation != self._generation:
             return  # a deliberate shutdown, or a late close from a host already replaced
         culprit = self._loading
@@ -206,6 +222,7 @@ class PluginHost:
 
     def shutdown(self) -> None:
         self._stopping = True
+        self._request_operations.shutdown()
         with self._lock:
             proc, channel = self._proc, self._channel
             self._proc = self._channel = None
@@ -310,29 +327,82 @@ class PluginHost:
                                            "attr": attr, "args": encode(list(args)), "kwargs": encode(kwargs)})
 
     def asgi_request(self, plugin_name: str, dashboard_dir: str, api_file: str, method: str, path: str,
-                     query: str, headers: list, body: bytes, *, timeout: Optional[float] = None,
-                     authenticated: bool = False) -> dict[str, Any]:
-        """One dashboard ``/api/plugins/<name>/`` request, served by the plugin's router in the host;
-        ``TimeoutError`` when no answer comes within ``timeout`` seconds (the host is left running)."""
+                     query: str, headers: list, body: bytes, *,
+                     trusted_context: Optional[dict[str, Any]] = None,
+                     timeout: Optional[float] = None, authenticated: bool = False,
+                     admission_timeout: float = 0) -> dict[str, Any]:
+        """Forward host-owned metadata separately from untrusted HTTP headers."""
+        limits = load_plugin_api_limits(dashboard_dir, api_file, trusted_context).for_path(path)
+        if len(body) > limits.request_bytes:
+            raise ValueError("plugin request too large")
+        large = limits.frames.extended
+        if large and not self._large_asgi.acquire(timeout=max(0, min(10, admission_timeout))):
+            from hermes_cli.plugin_host_wire import PluginHostBusy
+            raise PluginHostBusy('plugin request not forwarded')
+        try:
+            result = self._asgi_request(plugin_name, dashboard_dir, api_file, method, path,
+                                        query, headers, body, trusted_context, limits.frames, timeout, authenticated)
+            if not isinstance(result.get('body'), bytes) or len(result['body']) > limits.response_bytes:
+                raise ValueError('plugin response too large')
+            return result
+        finally:
+            if large:
+                self._large_asgi.release()
+
+    def _asgi_request(self, plugin_name, dashboard_dir, api_file, method, path,
+                      query, headers, body, trusted_context, frame_limits, timeout, authenticated):
+        forwarded = [list(h) for h in headers
+                     if trusted_context is None or h[0].lower() not in
+                     {"authorization", "cookie", "x-hermes-token", "x-hermes-session-token",
+                      "x-hermes-gateway-ticket"}]
         self.ensure_started()
-        return self._call("asgi", {"plugin": plugin_name, "dashboard_dir": dashboard_dir, "api_file": api_file,
-                                   "method": method, "path": path, "query": query,
-                                   "authenticated": authenticated is True,
-                                   "headers": [list(h) for h in headers], "body": encode(body)},
-                          timeout=timeout)
+        request_generation = self._generation
+        from hermes_cli.plugin_policy_incarnation import policy_incarnation
+        policy_home = trusted_context.get('home') if trusted_context else None
+        incarnation = self._base_context.copy().run(
+            policy_incarnation, policy_home, dashboard_dir, api_file) if policy_home else None
+        def enabled():
+            if request_generation != self._generation or not self.alive:
+                return False
+            if incarnation is None or incarnation != self._base_context.copy().run(
+                    policy_incarnation, policy_home, dashboard_dir, api_file):
+                return False
+            from hermes_cli.web_server_dashboard import _hosted_plugin_for_request
+            target = self._base_context.copy().run(_hosted_plugin_for_request, plugin_name)
+            return (target is not None and target[0] is self and
+                    target[1:] == (dashboard_dir, api_file))
+        capability = self._request_operations.open(trusted_context, plugin_name, method, path, body, enabled) if trusted_context else None
+        try:
+            return self._call("asgi", {"plugin": plugin_name, "dashboard_dir": dashboard_dir, "api_file": api_file,
+                                       "method": method, "path": path, "query": query,
+                                       "headers": forwarded, "body": encode(body),
+                                       "trusted_context": trusted_context,
+                                       "authenticated": authenticated is True,
+                                       "request_capability": capability},
+                              generation=request_generation, timeout=min(10.0, timeout) if timeout is not None else 10.0,
+                              frame_limits=frame_limits)
+        except Exception:
+            if capability:
+                self._request_operations.close(capability, failed=True)
+            raise
+        finally:
+            if capability:
+                self._request_operations.close(capability)
 
     def _unload(self, plugin_key: str) -> None:
+        self._request_operations.shutdown(plugin_key)
         self._contexts.pop(plugin_key, None)
         channel = self._channel
         if channel is None or channel.closed_reason is not None:
             return
-        errors = (channel.call("unload", {"plugin_key": plugin_key}) or {}).get("errors") or []
+        errors = (self._call("unload", {"plugin_key": plugin_key}, timeout=10.0) or {}).get("errors") or []
         for error in errors:
             logger.warning("Plugin '%s' on_unload callback failed in the plugin host: %s", plugin_key, error)
 
     # -- parent -> host -----------------------------------------------------------------------------
     def _call(self, method: str, params: dict[str, Any], *, generation: Optional[int] = None,
-              timeout: Optional[float] = None, returns: Any = None) -> Any:
+              timeout: Optional[float] = None, returns: Any = None,
+              frame_limits: FrameLimits = FrameLimits()) -> Any:
         """``returns`` is the type a core ABC declares for the result; the reply is rebuilt as it."""
         channel = self._channel
         try:
@@ -340,11 +410,15 @@ class PluginHost:
                 raise PluginHostUnavailable("not started")
             if generation is not None and generation != self._generation:
                 raise PluginHostUnavailable("this object belonged to a plugin host process that has exited")
-            if self._releases:
+            if self._releases and timeout is None:
                 released, self._releases = self._releases, []
                 channel.call("release", {"refs": released})
             resolve = functools.partial(self._resolve_result_ref, base=_host_object_base(returns))
-            return restore(decode(channel.call(method, params, timeout=timeout), resolve), returns)
+            return restore(decode(channel.call(method, params, timeout=timeout, frame_limits=frame_limits), resolve), returns)
+        except PluginHostDeadline:
+            from hermes_cli.plugin_host_containment import contain_deadline
+            contain_deadline(self, channel)
+            raise
         except PluginHostUnavailable as exc:
             raise PluginHostUnavailable(self._exit_reason()) from exc
 
@@ -380,6 +454,14 @@ class PluginHost:
         return (caller or self._base_context).copy()
 
     def _handle(self, method: str, params: dict[str, Any], _origin: Optional[int]) -> Any:
+        if method == "request_operation":
+            return self._request_operations.call(params)
+        if method == "cli_registration":
+            from hermes_cli.plugin_host_cli import register_native_cli
+            return register_native_cli(self, params)
+        if method == "cli_output":
+            from hermes_cli.plugin_host_cli import write_native_output
+            return write_native_output(self, params)
         if method == "ctx":
             return self._serve_ctx(params)
         if method == "facade":

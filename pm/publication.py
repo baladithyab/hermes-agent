@@ -120,6 +120,8 @@ class PluginSelection:
                "facts_before": file_digest(runtime_facts_path(project)),
                "config_after": hashlib.sha256(self.proposed).hexdigest()}
         durable_write_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
+        from hermes_cli.plugin_policy_epoch import record_policy_bytes
+        record_policy_bytes(self.home, self.previous, self.proposed)
         durable_write_bytes(self.path, self.proposed)
 
 

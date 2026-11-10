@@ -174,6 +174,14 @@ wheels for another platform (onnxruntime or torch on Android) does not block it;
 the shipped lock keeps its full platform coverage. Repair copies the recorded workspace and lock, including
 plugin build inputs, rather than resolving against edited live manifests.
 
+Identical buildable copies of a plugin enabled in several profiles share one
+dependency-workspace member. Project names are normalized before checking for a
+collision; the complete staged trees must match in content, entry types, modes,
+directories and internal link targets. Conflicting copies or external dependency
+path/link bindings refuse instead of choosing a winner or renaming a buildable
+package. Each profile retains its own plugin selection and permissions.
+Metadata-only and manifest-only members keep their separate workspace identities.
+
 Plugin enablement and staged code updates are submitted as data to the isolated
 PM worker. Under the installation lock, it discovers the proposed dependency
 union, validates the candidate, and publishes configuration or plugin files and

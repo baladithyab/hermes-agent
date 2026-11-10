@@ -45,11 +45,8 @@ HOST_UNSUPPORTED_CTX_METHODS: dict[str, str] = {
     "apost_message": "the returned handle is bound to the gateway's event loop and live adapter",
 }
 
-# Registered in-process only; skipped (with a warning, the plugin still loads) inside the host
-# because the surface they extend does not exist in a server process.
-HOST_SKIPPED_CTX_METHODS: dict[str, str] = {
-    "register_cli_command": "`hermes <command>` subcommands are wired into the local CLI parser",
-}
+# Native CLI registration forwards argv; its parser and handler remain in the host.
+HOST_SKIPPED_CTX_METHODS: dict[str, str] = {}
 
 # Live ctx facades the host reaches by method call; each call returns plain data.
 HOST_REMOTE_FACADES: frozenset[str] = frozenset({

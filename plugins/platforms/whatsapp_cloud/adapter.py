@@ -460,6 +460,11 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         """Clarify as native buttons: 1–3 choices → buttons, 4+ → list (+ "Other" row that flips
         the entry into text-capture mode), 0 → plain text question. Button ``id`` carries
         ``cl:<clarify_id>:<idx|other>``; inbound dispatches on it."""
+        # Quick replies submit one choice; multi-select uses the numbered-text path.
+        if choices:
+            from tools.clarify_gateway import get_pending
+            if getattr(get_pending(clarify_id), "multi_select", False):
+                return await super().send_clarify(chat_id, question, choices, clarify_id, session_key, metadata)
         question = (question or "").strip()
         if not choices:
             return await self.send(chat_id, f"❓ {question}", reply_to=_reply_to_from(metadata))

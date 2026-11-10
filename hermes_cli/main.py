@@ -2430,7 +2430,7 @@ def cmd_update(args):
 
 
 
-def _coalesce_session_name_args(argv: list) -> list:
+def _coalesce_session_name_args(argv: list, raw_commands=()) -> list:
     """Join unquoted multi-word session names after -c/--continue and -r/--resume.
 
     ``hermes -c Pokemon Agent Dev`` → ``['-c', 'Pokemon Agent Dev']``; tokens
@@ -2443,12 +2443,23 @@ def _coalesce_session_name_args(argv: list) -> list:
         "desktop", "gui", "honcho", "claw", "plugins", "security", "acp", "webhook", "peer",
         "memory", "dump", "debug", "backup", "import", "completion", "logs", "usage",
     }
+    _SUBCOMMANDS.update(raw_commands)
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
+    from hermes_cli._parser import top_level_value_flag_sets
+    required_values, optional_values = top_level_value_flag_sets()
+    value_flags = (required_values | optional_values) - _SESSION_FLAGS
 
     result = []
     i = 0
     while i < len(argv):
         token = argv[i]
+        if token in value_flags and i + 1 < len(argv):
+            result.extend(argv[i:i + 2])
+            i += 2
+            continue
+        if token in raw_commands:
+            result.extend(argv[i:])
+            break
         if token in _SESSION_FLAGS:
             result.append(token)
             i += 1
@@ -3225,12 +3236,15 @@ def _advertise_agent_env() -> None:
 
 def _attach_plugin_cli_command(subparsers, cmd_info) -> None:
     """Register one plugin-provided top-level command from its descriptor."""
+    parser_kwargs = {"prefix_chars": "\0", "add_help": False} if cmd_info.get("raw_argv") else {}
     plugin_parser = subparsers.add_parser(
         cmd_info["name"],
         help=cmd_info["help"],
         description=cmd_info.get("description", ""),
         formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+        **parser_kwargs,
     )
+    plugin_parser._hermes_raw_argv = bool(cmd_info.get("raw_argv"))
     cmd_info["setup_fn"](plugin_parser)
     if cmd_info.get("handler_fn") is not None:
         plugin_parser.set_defaults(func=cmd_info["handler_fn"])
@@ -3388,7 +3402,9 @@ def _parse_cli_args(parser, subparsers, argv):
     """
     import io as _io
 
-    _processed_argv = _coalesce_session_name_args(argv)
+    _raw_commands = {name for name, command in getattr(subparsers, "choices", {}).items()
+                     if getattr(command, "_hermes_raw_argv", False)}
+    _processed_argv = _coalesce_session_name_args(argv, _raw_commands)
     _known_cmds = (
         set(subparsers.choices.keys()) if hasattr(subparsers, "choices") else set()
     )

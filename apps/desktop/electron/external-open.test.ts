@@ -165,7 +165,7 @@ test('opens protocol-relative URLs as https, never as local paths', async () => 
   assert.equal(calls.localOpened.length, 0)
 })
 
-test('wsl: spawns cmd.exe and resolves ok on the happy path', async () => {
+test('wsl: invokes the Windows URI handler without a command shell', async () => {
   const spawned: string[] = []
   const proc = new EventEmitter() as unknown as ChildProcess
 
@@ -178,14 +178,14 @@ test('wsl: spawns cmd.exe and resolves ok on the happy path', async () => {
     }
   })
 
-  const result = await openExternalUrl('https://example.com', deps)
+  const url = 'https://example.com/oauth?state=a&code=b|c^d%20e#fragment'
+  const result = await openExternalUrl(url, deps)
 
   assert.deepEqual(result, { ok: true })
-  assert.equal(spawned[0], 'cmd.exe')
-  assert.ok(spawned.some(arg => arg === 'https://example.com/'))
+  assert.deepEqual(spawned, ['rundll32.exe', 'url.dll,FileProtocolHandler', new URL(url).toString()])
 })
 
-test('wsl: falls back to openExternal and notifies when cmd.exe fails to spawn', async () => {
+test('wsl: falls back to openExternal and notifies when the URI handler fails to spawn', async () => {
   const proc = new EventEmitter() as unknown as ChildProcess
   const { deps, calls } = makeDeps({ isWsl: true, spawn: () => proc })
 
@@ -205,6 +205,47 @@ test('wsl: falls back to openExternal and notifies when cmd.exe fails to spawn',
 
   assert.deepEqual(calls.opened, ['https://example.com/'])
   assert.deepEqual(calls.notified, [['https://example.com/', 'xdg-open missing']])
+})
+
+test('OAuth launch secrets reach the browser and failure UI but never launch logs', async () => {
+  const url = 'https://auth.example.test/authorize?state=private-state&code=private-code#private-fragment'
+  const proc = new EventEmitter() as unknown as ChildProcess
+  const spawned: string[] = []
+  const { deps, calls } = makeDeps({
+    isWsl: true,
+    spawn: (cmd, args) => {
+      spawned.push(cmd, ...args)
+      return proc
+    },
+    openExternal: async () => { throw new Error(`Could not open ${url}`) }
+  })
+  const notification = new Promise<void>(resolve => {
+    deps.notifyFailure = (openedUrl, message) => {
+      calls.notified.push([openedUrl, message])
+      resolve()
+    }
+  })
+
+  await openExternalUrl(url, deps)
+  assert.ok(spawned.includes(url))
+  proc.emit('error', new Error(`Windows URI handler failed for ${url}`))
+  await notification
+  assert.equal(calls.notified[0]?.[0], url)
+  assert.ok(calls.logged.length > 0)
+  for (const line of calls.logged) {
+    assert.ok(!line.includes('private-'), line)
+    assert.ok(!line.includes(url), line)
+  }
+})
+
+test('native browser errors cannot echo OAuth query or fragment secrets into logs', async () => {
+  const url = 'https://auth.example.test/?state=secret-state#secret-token'
+  const { deps, calls } = makeDeps({
+    openExternal: async () => { throw new Error(`Cannot launch ${url}`) }
+  })
+  await openExternalUrl(url, deps)
+  assert.equal(calls.notified[0]?.[0], url)
+  assert.ok(calls.logged.every(line => !line.includes('secret-')))
 })
 
 test('guard: missing-file error is reported once and classified as a miss', () => {

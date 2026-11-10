@@ -781,7 +781,7 @@ def validate_requested_model(
     model_name: str,
     provider: Optional[str],
     *,
-    api_key: Optional[str] = None,
+    api_key: Any = None,
     base_url: Optional[str] = None,
     api_mode: Optional[str] = None,
     headers: Optional[dict[str, str]] = None,
@@ -793,6 +793,19 @@ def validate_requested_model(
     from hermes_cli import models as _m
 
     requested = (model_name or "").strip()
+    if not requested:
+        return _reject("Model name cannot be empty.")
+    # Native catalog detection also builds auth headers, before the common HTTP probe.
+    if callable(api_key):
+        from agent.command_token_source import materialize_probe_api_key
+        api_key = materialize_probe_api_key(api_key)
+        if not api_key:
+            # Unavailable auth follows the custom unreachable-catalog mode policy,
+            # without retrying either catalog anonymously.
+            return _verdict(
+                api_mode in ("chat_completions", "anthropic_messages"), True, False,
+                f"Note: could not obtain this provider's credential to validate `{requested}`.",
+            )
     normalized = _m.normalize_provider(provider)
     if normalized == "openrouter" and base_url and not base_url_host_matches(base_url, "openrouter.ai"):
         normalized = "custom"
@@ -800,8 +813,6 @@ def validate_requested_model(
     profile = get_provider_profile(normalized) if normalized else None
     lookup = (profile.normalize_model_id(requested, api_key=api_key or "") if profile is not None else None) or requested
 
-    if not requested:
-        return _reject("Model name cannot be empty.")
     req = _Request(requested, lookup, provider, normalized, api_key, base_url, api_mode, headers)
     for gate, branch in _LADDER:
         if gate(req):

@@ -2312,15 +2312,21 @@ def _probe_result(
 
 
 def probe_api_models(
-    api_key: Optional[str], base_url: Optional[str], timeout: float = 5.0,
+    api_key: Any, base_url: Optional[str], timeout: float = 5.0,
     api_mode: Optional[str] = None, request_headers: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Probe a ``/models`` endpoint with light URL heuristics (``base`` then ``base±/v1``).
     ``anthropic_messages`` mode sends ``x-api-key`` + ``anthropic-version`` instead of a bearer; the
-    ``data[].id`` response shape is identical. ``models`` is None when no candidate answered."""
+    ``data[].id`` response shape is identical. Callable credentials are materialized before HTTP;
+    failed credentials never become anonymous probes. ``models`` is None when no candidate answered."""
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         return _probe_result(None, None, "")
+    if callable(api_key):
+        from agent.command_token_source import materialize_probe_api_key
+        api_key = materialize_probe_api_key(api_key)
+        if not api_key:
+            return _probe_result(None, None, normalized)
     from providers import profile_for_host
 
     owner = profile_for_host(normalized, metadata=True)
@@ -2530,7 +2536,7 @@ def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
 
 
 def fetch_api_models(
-    api_key: Optional[str], base_url: Optional[str], timeout: float = 5.0,
+    api_key: Any, base_url: Optional[str], timeout: float = 5.0,
     api_mode: Optional[str] = None, headers: Optional[dict[str, str]] = None,
 ) -> Optional[list[str]]:
     """Fetch the list of available model IDs from the provider's ``/models`` endpoint."""
@@ -2608,8 +2614,7 @@ def cached_fetch_api_models(
     def _live():
         if fetch_models is not None:
             return fetch_models()
-        from agent.command_token_source import materialize_probe_api_key
-        return fetch_api_models(materialize_probe_api_key(api_key), base_url, timeout=timeout, api_mode=api_mode, headers=headers)
+        return fetch_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers)
 
     normalized_url = str(base_url or "").strip().rstrip("/").lower()
     if not normalized_url:  # nothing to key the cache on

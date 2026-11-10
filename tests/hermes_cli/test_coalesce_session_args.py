@@ -21,12 +21,16 @@ class TestCoalesceSessionNameArgs:
     # ── combined flags ───────────────────────────────────────────────────
 
 
-    # ── passthrough (no session flags) ───────────────────────────────────
+    def test_option_value_matching_raw_command_does_not_stop_merging(self):
+        assert _coalesce_session_name_args(
+            ["--in", "cpa", "--resume", "Alpha", "Beta"], raw_commands={"cpa"}
+        ) == ["--in", "cpa", "--resume", "Alpha Beta"]
 
-    def test_no_session_flags_passthrough(self):
-        """hermes -w chat -q hello (nothing to merge)"""
-        result = _coalesce_session_name_args(["-w", "chat", "-q", "hello"])
-        assert result == ["-w", "chat", "-q", "hello"]
+    def test_raw_command_keeps_its_own_resume_arguments(self):
+        assert _coalesce_session_name_args(
+            ["--resume", "Alpha", "Beta", "cpa", "probe", "-r", "one", "two"],
+            raw_commands={"cpa"},
+        ) == ["--resume", "Alpha Beta", "cpa", "probe", "-r", "one", "two"]
 
 
     # ── subcommand boundary ──────────────────────────────────────────────

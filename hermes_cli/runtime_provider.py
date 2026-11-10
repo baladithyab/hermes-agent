@@ -34,7 +34,7 @@ from hermes_cli.auth import (  # resolve_external_process_provider_credentials i
 from hermes_cli import config as _config_mod
 from hermes_cli import models as _models  # attribute access keeps ``hermes_cli.models.<name>`` patches effective
 from hermes_constants import OPENROUTER_BASE_URL
-from hermes_cli.providers import determine_api_mode, get_provider, is_actual_route, is_official_openai_host, nous_api_mode
+from hermes_cli.providers import custom_provider_aliases, determine_api_mode, get_provider, is_actual_route, is_official_openai_host, nous_api_mode
 from utils import base_url_host_matches, base_url_hostname, base_url_path, env_int
 
 
@@ -921,14 +921,18 @@ _LOCAL_BYPASS_CLOUD_HOSTS = ("openrouter.ai", "anthropic.com", "openai.com")
 
 
 def _raise_if_provider_disabled(requested_provider: str) -> None:
-    """Honour ``providers.<name>.enabled: false`` for built-ins too (the custom lookup gate only
-    covers custom blocks); a typed error lets the fallback chain advance."""
+    """Reject disabled providers using the same identities as named custom lookup."""
     full_cfg = load_config()
     provs_cfg = full_cfg.get("providers") if isinstance(full_cfg, dict) else None
-    block = provs_cfg.get(requested_provider) if isinstance(provs_cfg, dict) else None
-    if isinstance(block, dict) and not _config_mod.is_provider_enabled(block):
-        raise ValueError(f"provider {requested_provider!r} is disabled in config "
-                         f"(providers.{requested_provider}.enabled: false)")
+    if not isinstance(provs_cfg, dict):
+        return
+    requested_norm = _normalize_custom_provider_name(requested_provider)
+    for name, block in provs_cfg.items():
+        if not isinstance(block, dict) or _config_mod.is_provider_enabled(block):
+            continue
+        if requested_norm in custom_provider_aliases(str(block.get("name") or name), str(name)):
+            raise ValueError(f"provider {requested_provider!r} is disabled in config "
+                             f"(providers.{name}.enabled: false)")
 
 
 def _raise_if_local_alias_missing_endpoint(requested_provider: str, explicit_base_url: Optional[str]) -> None:
@@ -1163,19 +1167,20 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
                                   ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     """``resolve_runtime_provider`` plus resolution-time fallback: ``(runtime, fallback_entry_or_None)``.
 
-    Only an ``AuthError`` from the primary (missing/expired credentials, exhausted quota, cooled-down pool)
-    walks ``get_fallback_chain(config)`` in order and returns the first entry that resolves — the single
-    resolution-time walker shared by the gateway and oneshot. ``ValueError``/other errors are genuine
-    misconfiguration (unknown ``--provider`` ...) and propagate unchanged, so a typo is never silently
-    rerouted onto a provider the operator did not ask for. When every entry fails, the *primary* error is
-    re-raised: a fallback entry's failure is not what the operator configured first (#81209). The entry's
-    ``model`` is the model the caller must send.
+    Only a credential-related ``AuthError`` from the primary (missing/expired credentials, exhausted
+    quota, cooled-down pool) walks ``get_fallback_chain(config)`` in order and returns the first entry
+    that resolves. Invalid-provider ``AuthError`` and ``ValueError`` are misconfiguration and propagate
+    unchanged, so a removed named provider or typo is never silently rerouted.
+    When every fallback fails, the primary error is re-raised (#81209).
+    The entry's ``model`` is the model the caller must send.
     """
     from hermes_cli.auth import AuthError, primary_failure_wording
     try:
         return resolve_runtime_provider(requested=requested, target_model=target_model,
                                         explicit_base_url=explicit_base_url, explicit_api_key=explicit_api_key), None
     except AuthError as primary_exc:
+        if primary_exc.code == "invalid_provider":
+            raise
         from hermes_cli.fallback_config import effective_runtime_provider, get_fallback_chain, resolve_entry_api_key
         for entry in get_fallback_chain(config):
             provider = (entry.get("provider") or "").strip().lower()

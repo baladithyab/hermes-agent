@@ -235,7 +235,9 @@ class PluginEviction:
                            for path, previous, proposed in self.edits],
                "facts_before": file_digest(runtime_facts_path(project))}
         durable_write_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
-        for path, _previous, proposed in self.edits:
+        from hermes_cli.plugin_policy_epoch import record_policy_bytes
+        for path, previous, proposed in self.edits:
+            record_policy_bytes(path.parent, previous, proposed)
             durable_write_bytes(path, proposed)
 
 

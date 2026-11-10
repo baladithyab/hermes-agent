@@ -699,6 +699,52 @@ def plugin_load_error(plugin: str) -> str:
     return _home_layer().errors.get(plugin, "")
 
 
+def _entry_point_manifest_files(ep) -> list[Path]:
+    """Installed or editable-distribution manifests, without resolving/importing its target."""
+    import json
+    from urllib.parse import urlsplit
+    from urllib.request import url2pathname
+
+    dist = getattr(ep, "dist", None)
+    if dist is None:
+        return []
+    try:
+        paths = [Path(dist.locate_file(item)) for item in (dist.files or ())
+                 if Path(str(item)).name in {"plugin.yaml", "plugin.yml"}]
+        direct = json.loads(dist.read_text("direct_url.json") or "{}")
+        url = urlsplit(direct.get("url", ""))
+        # Editable installs record the project root rather than its manifest in RECORD.
+        # Only local file URLs are metadata paths; never fetch a remote source URL.
+        if direct.get("dir_info", {}).get("editable") is True and url.scheme == "file" and url.netloc in {"", "localhost"}:
+            root = Path(url2pathname(url.path))
+            paths.extend(root / name for name in ("plugin.yaml", "plugin.yml"))
+        return paths
+    except (OSError, TypeError, ValueError, AttributeError):
+        return []  # Missing/malformed metadata cannot establish a general-plugin target.
+
+
+def _entry_point_is_declared_general_plugin(ep) -> bool:
+    """Positive manifest match only; an unknown/provider target must still be refused in host mode.
+
+    The shared entry-point group includes ``register(ctx)`` general plugins. Loading one to
+    inspect its signature would already execute third-party code in the parent interpreter.
+    A matching declarative target leaves that entry point to the isolated PluginManager.
+    """
+    from utils import fast_safe_load
+
+    kinds = set()
+    for path in _entry_point_manifest_files(ep):
+        try:
+            data = fast_safe_load(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue  # Unreadable/invalid YAML is unknown, never permission to import code.
+        if not isinstance(data, dict) or data.get("name") != ep.name or data.get("entry_point") != ep.value:
+            continue
+        kind = data.get("kind", "standalone")
+        kinds.add(kind.strip().lower() if isinstance(kind, str) else "unknown")
+    return bool(kinds) and kinds <= {"standalone", "backend", "platform"}
+
+
 def _discover_entry_point_providers() -> None:
     """Import pip-installed provider plugins via the ``hermes_agent.plugins``
     entry-point group so they self-register.
@@ -724,6 +770,8 @@ def _discover_entry_point_providers() -> None:
       with general plugins whose target is ``register(ctx)``. Callables that
       require arguments are skipped here (the PluginManager owns them);
       provider registration hooks take no arguments by contract.
+      Under host isolation, installed manifests identify general targets before
+      any import; provider and unknown targets retain the isolation refusal.
 
     Failures are swallowed per-entry (a broken third-party package must not
     break provider discovery) and logged at warning level. This scan runs
@@ -770,6 +818,9 @@ def _discover_entry_point_providers() -> None:
         from hermes_cli.plugin_isolation import in_process_import_refusal
         refusal = in_process_import_refusal(f"pip-installed model-provider plugin {ep.name!r}")
         if refusal:
+            if _entry_point_is_declared_general_plugin(ep):
+                logger.debug("entry-point %r owned by PluginManager (declared general plugin)", ep.name)
+                continue
             logger.warning("%s", refusal)
             continue
         try:

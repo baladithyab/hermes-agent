@@ -581,6 +581,11 @@ class _LocalOriginCORSMiddleware(CORSMiddleware):
 # middlewares before CORS can answer, producing 401 instead of 204 + headers.
 app.add_middleware(_LocalOriginCORSMiddleware, allow_methods=["*"], allow_headers=["*"])
 
+# Resource origins must bypass every ordinary Hermes route, including auth,
+# redirects and the SPA fallback. This remains the outermost application layer.
+from hermes_cli.plugin_resource_presentation import PluginResourceMiddleware
+app.add_middleware(PluginResourceMiddleware)
+
 
 # Authenticated-route self-test: one in-process request per minute against a
 # cheap DB-touching route, catching "liveness fine but every authed request 500s".
@@ -1081,6 +1086,9 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         # behind a tunnel (SSH-isolated backend, public gate) keeps it.
         ws_per_message_deflate=ssh_isolated or not _is_loopback or bool(app.state.auth_required),
         ws_max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES,
+        # Native resource GET forms permit a 64 KiB encoded query. Bound the
+        # HTTP parser too, rather than failing before the resource middleware.
+        h11_max_incomplete_event_size=128 * 1024,
         # Desktop sends a single SIGTERM and escalates to SIGKILL ~5s later;
         # uvicorn's default (None) waits on lingering ASGI tasks forever, so a
         # mid-turn request orphans the backend past that budget (#76244). 3s

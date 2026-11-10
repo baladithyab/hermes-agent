@@ -1,7 +1,7 @@
 import type { ConnectionState } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
-import { setApiRequestLocalMode } from '@/api/client'
+import { setApiRequestBackend, setApiRequestLocalMode } from '@/api/client'
 import { lastVisibleMessageIsUser } from '@/app/chat/thread-loading'
 import type { ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
@@ -1495,7 +1495,9 @@ export function clearComposerSelectionOwner(): void {
 }
 
 export const setConnection = (next: Updater<HermesConnection | null>) => {
-  updateAtom($connection, next)
+  const connection = typeof next === 'function' ? next($connection.get()) : next
+  setApiRequestBackend(connection)
+  updateAtom($connection, connection)
   // Repoint connection-scoped persistence (pins, manual session order,
   // remembered navigation) at the new backend's storage scope before any
   // consumer reconciles against it. A null descriptor (reconnect blip)

@@ -38,6 +38,26 @@ logger = logging.getLogger("hermes_cli.plugin_host_child")
 _ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
 
+class HostedRequestOperations:
+    """Backend-only request capability; accepted checks retain their original home."""
+
+    def __init__(self, channel, capability):
+        self._channel, self._capability = channel, capability
+
+    def accept(self, operation_id, revision, *, timeout=2.0):
+        return self._channel.call('request_operation', {
+            'verb': 'accept', 'capability': self._capability,
+            'operation_id': operation_id, 'revision': revision}, timeout=min(2.0, timeout))
+
+    def retire(self, accepted, *, timeout=2.0):
+        return self._channel.call('request_operation', {
+            'verb': 'retire', 'capability': accepted['capability']}, timeout=min(2.0, timeout)) is True
+
+    def revalidate(self, accepted, *, timeout=2.0):
+        return self._channel.call('request_operation', {
+            'verb': 'revalidate', 'capability': accepted['capability']}, timeout=min(2.0, timeout)) is True
+
+
 class RemoteRegistration:
     """Child-side twin of ``PluginRegistration``: ``dispose()`` releases the Hermes-side entry."""
 
@@ -116,6 +136,15 @@ class RemotePluginContext:
             raise AttributeError(f"'PluginContext' object has no attribute {name!r}")
         return functools.partial(self._runtime.ctx_call, self._plugin_key, name)
 
+    def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+        from hermes_cli.plugin_host_cli import native_executor
+        executor = native_executor(self._runtime, self._plugin_key, name, description, setup_fn, handler_fn)
+        return self._runtime._send_call(
+            "cli_registration", self._plugin_key,
+            {"name": name, "help": help, "description": description, "args": [executor]},
+            allow_objects=False,
+        )
+
     def on_unload(self, callback: Callable[[], Any]) -> None:
         if not callable(callback):
             raise TypeError("on_unload() callback must be callable")
@@ -135,14 +164,18 @@ class HostRuntime:
         self._lock = threading.Lock()
         self.unload_callbacks: dict[str, list[Callable[[], Any]]] = {}
         self.modules: dict[str, str] = {}
-        self.asgi_apps: dict[str, Any] = {}
+        from hermes_cli.plugin_host_asgi import DashboardLifetimes
+        self.dashboard_lifetimes = DashboardLifetimes()
         self.profiles: dict[str, dict[str, Any]] = {}
         self.instance_modules: dict[str, Any] = {}
         self.stopped = threading.Event()
+        from hermes_cli.plugin_host_cli import NativeCliPump
+        self.native_cli = NativeCliPump(self.stopped)
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, name="plugin-host-loop", daemon=True).start()
+        from hermes_cli.plugin_api_limits import asgi_frame_limits
         self.channel = Channel(reader, writer, self.handle, name="plugin-host",
-                               on_close=lambda _reason: self.stopped.set())
+                               on_close=self.native_cli.close, incoming_limits=asgi_frame_limits)
 
     # -- references -----------------------------------------------------------------------------
     def _remember(self, plugin_key: str, value: Any) -> int:
@@ -305,36 +338,57 @@ class HostRuntime:
     def op_asgi(self, params: dict[str, Any]) -> Any:
         """Serve one dashboard API request with the plugin's FastAPI ``router`` (loaded once)."""
         api_path = Path(str(params["dashboard_dir"])) / str(params["api_file"])
-        app = self.asgi_apps.get(str(api_path))
-        if app is None:
-            from fastapi import FastAPI
-            module_name = f"hermes_dashboard_plugin_{params['plugin']}"
-            spec = importlib.util.spec_from_file_location(module_name, api_path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"cannot load dashboard api {api_path}")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
-            router = getattr(module, "router", None)
-            if router is None:
-                raise AttributeError(f"dashboard api {api_path.name} has no 'router'")
-            app = FastAPI()
-            app.include_router(router)
-            self.asgi_apps[str(api_path)] = app
-
+        from hermes_cli.plugin_api_limits import load_plugin_api_limits
+        limits = load_plugin_api_limits(str(params["dashboard_dir"]), str(params["api_file"]),
+                                        params.get("trusted_context")).for_path(str(params.get('path', '')))
+        body = decode(params.get("body")) or b""
+        if not isinstance(body, bytes) or len(body) > limits.request_bytes:
+            raise ValueError('plugin request too large')
         async def request() -> dict[str, Any]:
+            async with self.dashboard_lifetimes.request(str(params['plugin']), api_path) as app:
+                return await asyncio.wait_for(dispatch(app), timeout=5)
+
+        async def dispatch(app) -> dict[str, Any]:
             import httpx
+            response_bytes = 0
+            async def bounded_send(message, send):
+                nonlocal response_bytes
+                if message['type'] == 'http.response.body':
+                    response_bytes += len(message.get('body', b''))
+                    if response_bytes > limits.response_bytes:
+                        raise ValueError('plugin response too large')
+                elif message['type'] == 'http.response.start':
+                    if sum(len(k) + len(v) for k, v in message.get('headers', [])) > 64 * 1024:
+                        raise ValueError('plugin response headers too large')
+                await send(message)
+            async def scoped_app(scope, receive, send):
+                # Per-request ASGI state, never shared app.state: simultaneous
+                # requests can carry different authenticated selection epochs.
+                scope = dict(scope)
+                scope['state'] = {**scope.get('state', {}),
+                                  'hermes_context': params.get('trusted_context')}
+                capability = params.get('request_capability')
+                if capability:
+                    scope['state']['hermes_operations'] = HostedRequestOperations(self.channel, capability)
+                await app(scope, receive, lambda message: bounded_send(message, send))
+
             from hermes_cli.plugin_host_http_auth import with_hosted_admission
-            transport = httpx.ASGITransport(app=with_hosted_admission(app, params.get("authenticated")))
+            transport = httpx.ASGITransport(app=with_hosted_admission(scoped_app, params.get("authenticated")))
             async with httpx.AsyncClient(transport=transport, base_url="http://plugin-host") as client:
                 response = await client.request(
                     str(params["method"]), str(params["path"]), params=str(params.get("query") or ""),
                     headers=[tuple(h) for h in params.get("headers") or []],
-                    content=decode(params.get("body")) or b"")
+                    content=body)
             return {"status": response.status_code, "headers": list(response.headers.multi_items()),
                     "body": response.content}
 
-        return encode(self._run(request()))
+        try:
+            # The parent owns the hard total deadline. A nested wait_for here
+            # cancels an inner wait_for's waiter and can return while a plugin
+            # suppresses cancellation in the now-orphaned inner task.
+            return encode(self._run(request()))
+        except TimeoutError as exc:
+            raise TimeoutError('dashboard request or startup timed out') from exc
 
     def op_invoke(self, params: dict[str, Any]) -> Any:
         ref = int(params["ref"])
@@ -393,7 +447,7 @@ class HostRuntime:
 
     def op_unload(self, params: dict[str, Any]) -> dict[str, Any]:
         plugin_key = str(params["plugin_key"])
-        errors = []
+        errors = self._run(self.dashboard_lifetimes.unload(plugin_key))
         for callback in reversed(self.unload_callbacks.pop(plugin_key, [])):
             try:
                 self._run(callback())
@@ -410,7 +464,7 @@ class HostRuntime:
         return {"errors": errors}
 
     def op_shutdown(self, _params: dict[str, Any]) -> None:
-        for plugin_key in list(self.unload_callbacks):
+        for plugin_key in set(self.unload_callbacks) | set(self.dashboard_lifetimes.slots):
             self.op_unload({"plugin_key": plugin_key})
         self.stopped.set()
 
@@ -596,12 +650,14 @@ def extract_profiles_main(path: str, module_name: str) -> int:
 
 def main() -> int:
     reader, writer = _take_protocol_streams()
+    from hermes_cli.plugin_host_cli import route_native_output
+    route_native_output()
     import hermes_bootstrap
     logging.basicConfig(stream=sys.stderr, level=os.environ.get("HERMES_PLUGIN_HOST_LOG_LEVEL", "WARNING"),
                         format="%(levelname)s %(name)s: %(message)s")
     runtime = HostRuntime(reader, writer)
     runtime.channel.start()
-    runtime.stopped.wait()
+    runtime.native_cli.serve()
     runtime.channel.close("host shutdown")
     return 0
 

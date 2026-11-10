@@ -1,4 +1,11 @@
 """The workspace and admission paths agree on scoped keys and disabled plugins."""
+from pathlib import Path
+import sys
+import tomllib
+
+import pytest
+
+from pm import workspace
 from pm.workspace import enabled_member_dirs
 
 
@@ -169,3 +176,72 @@ def test_tooling_only_pyproject_with_dev_group_stages_the_manifest_dependencies(
         encoding="utf-8"))
     assert document["project"]["dependencies"] == ["fixturedep>=1,<2"]
     assert "dependency-groups" not in document
+
+
+@pytest.mark.parametrize("kind,readonly", [
+    ("buildable", None), ("package", None), ("virtual", None), ("manifest", None),
+    ("buildable", "root"), ("buildable", "child"),
+])
+def test_workspace_shares_buildable_inputs_without_merging_home_selections(tmp_path, monkeypatch, kind, readonly):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    homes = [home, home / "profiles" / "first", home / "profiles" / "second",
+             home / "profiles" / "disabled"]
+    plugins = []
+    read_only_sources = {}
+    for index, owner in enumerate(homes):
+        plugin = owner / "plugins" / "shared"
+        plugin.mkdir(parents=True)
+        disabled = "[shared]" if index == 3 else "[]"
+        (owner / "config.yaml").write_text(
+            f"plugins:\n  enabled: [shared]\n  disabled: {disabled}\n", encoding="utf-8",
+        )
+        (owner / ".env").write_text("SENTINEL=unchanged\n", encoding="utf-8")
+        if kind == "manifest":
+            (plugin / "plugin.yaml").write_text(
+                'name: shared\npython_dependencies: ["example>=1,<2"]\n', encoding="utf-8",
+            )
+        else:
+            backend = {
+                "buildable": '[build-system]\nrequires=[]\nbuild-backend="backend"\n',
+                "package": "[tool.uv]\npackage=true\n",
+                "virtual": "",
+            }[kind]
+            (plugin / "pyproject.toml").write_text(
+                '[project]\nname="Shared_Plugin"\nversion="1"\n'
+                'dependencies=["example>=1,<2"]\n' + backend, encoding="utf-8",
+            )
+            (plugin / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
+        if readonly:
+            directory = plugin if readonly == "root" else plugin / "package"
+            directory.mkdir(exist_ok=True)
+            (directory / "readonly.py").write_text("VALUE = 2\n", encoding="utf-8")
+            directory.chmod(0o555)
+            read_only_sources[directory] = directory.stat().st_mode
+        plugins.append(plugin)
+    before = {path: path.read_bytes() for owner in homes
+              for path in (owner / "config.yaml", owner / ".env")}
+    core = tmp_path / "core"
+    core.mkdir()
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="core"\nversion="1"\n[tool.uv]\npackage=false\n', encoding="utf-8",
+    )
+
+    selected = enabled_member_dirs()
+    assert set(selected) == set(plugins[:3])
+    root = tmp_path / "workspace"
+    workspace._generate_pyproject(selected, root, source=core, python=Path(sys.executable))
+    members = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
+    documents = [tomllib.loads((root / member / "pyproject.toml").read_text()) for member in members]
+    if kind in {"buildable", "package"}:
+        assert [document["project"]["name"] for document in documents] == ["Shared_Plugin"]
+    else:
+        assert len({document["project"]["name"] for document in documents}) == 3
+    assert all(document["project"]["dependencies"] == ["example>=1,<2"] for document in documents)
+    assert set(enabled_member_dirs()) == set(plugins[:3])
+    assert {entry[2] for entry in workspace.enabled_plugin_entries(
+        proposed_home=homes[1], enabled=["shared"], disabled=["shared"],
+    )} == {plugins[0], plugins[2]}
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert all(directory.stat().st_mode == mode for directory, mode in read_only_sources.items())

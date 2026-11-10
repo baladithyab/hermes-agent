@@ -9,7 +9,7 @@ import pytest
 
 from pm import workspace
 from tests.pm import _fixtures
-from pm.environment import managed_environment
+from pm.environment import PythonEnvironment, managed_environment
 
 
 
@@ -53,6 +53,183 @@ build_editable = build_wheel
 ''', encoding="utf-8")
 
 
+@pytest.fixture
+def duplicate_buildable_inputs(tmp_path):
+    core = tmp_path / "core"
+    core.mkdir()
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="core"\nversion="1"\n[tool.uv]\npackage=false\n', encoding="utf-8",
+    )
+    (core / "uv.lock").write_text("version = 1\n# core input\n", encoding="utf-8")
+    plugins = [tmp_path / owner / "plugin" for owner in ("first", "second")]
+    for plugin in plugins:
+        _buildable_source(plugin)
+        (plugin / "uv.lock").write_text("version = 1\n# plugin input\n", encoding="utf-8")
+    return core, plugins
+
+
+@pytest.mark.parametrize("difference", ["code", "backend", "version", "alias", "readme", "lock", "directory"])
+def test_same_named_buildable_inputs_refuse_conflicts(tmp_path, duplicate_buildable_inputs, difference):
+    core, plugins = duplicate_buildable_inputs
+    changed = plugins[1]
+    if difference in {"version", "alias"}:
+        metadata = changed / "pyproject.toml"
+        old, new = ('version="1.0"', 'version="2.0"') if difference == "version" else (
+            'name="replay-plugin"', 'name="Replay_Plugin"',
+        )
+        metadata.write_text(metadata.read_text().replace(old, new), encoding="utf-8")
+    elif difference == "directory":
+        (changed / "additional-inputs").mkdir()
+    else:
+        relative = {"code": "replay_plugin/values.py", "backend": "build/backend.py",
+                    "readme": "README.md", "lock": "uv.lock"}[difference]
+        (changed / relative).write_text("different build input\n", encoding="utf-8")
+    before = {path: path.read_bytes() for tree in [core, *plugins]
+              for path in tree.rglob("*") if path.is_file()}
+    environment = PythonEnvironment(
+        uv=tmp_path / "uv-must-not-run", python=Path(sys.executable),
+        destination=tmp_path / "environment", cache=tmp_path / "cache", env={}, offline=True,
+    )
+
+    with pytest.raises(workspace.InstallError, match="conflicting buildable plugin project 'replay-plugin'"):
+        workspace.lock_and_sync(plugins, [], root=tmp_path / "workspace", source=core,
+                                seed_lock=core / "uv.lock", environment=environment)
+
+    assert not environment.destination.exists()
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+@pytest.mark.parametrize("binding", ["internal", "external-relative", "external-absolute"])
+def test_buildable_coalescing_uses_effective_dependency_paths(tmp_path, duplicate_buildable_inputs, binding):
+    import tomllib
+
+    core, plugins = duplicate_buildable_inputs
+    identities = [tmp_path / owner / "plugins" / "plugin" for owner in ("home-a", "home-b")]
+    shared = tmp_path / "shared-dependency"
+    for plugin in plugins:
+        dependency = plugin / "dependency" if binding == "internal" else (
+            plugin.parent / "dependency" if binding == "external-relative" else shared
+        )
+        dependency.mkdir(exist_ok=True)
+        (dependency / "pyproject.toml").write_text(
+            '[project]\nname="local-dep"\nversion="1"\n', encoding="utf-8",
+        )
+        path = {"internal": "dependency", "external-relative": "../dependency",
+                "external-absolute": shared.as_posix()}[binding]
+        metadata = plugin / "pyproject.toml"
+        metadata.write_text(
+            metadata.read_text().replace("[build-system]", 'dependencies=["local-dep>=1,<2"]\n[build-system]')
+            + f'\n[tool.uv.sources]\nlocal-dep={{path={json.dumps(path)}}}\n', encoding="utf-8",
+        )
+    before = [(plugin / "pyproject.toml").read_bytes() for plugin in plugins]
+    root = tmp_path / "workspace"
+    inputs = dict(zip(identities, plugins))
+    if binding == "internal":
+        workspace._generate_pyproject(inputs, root, source=core, python=Path(sys.executable))
+        [relative] = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
+        member = root / relative
+        document = tomllib.loads((member / "pyproject.toml").read_text())
+        assert document["tool"]["uv"]["sources"]["local-dep"]["path"] == "dependency"
+        assert (member / "dependency" / "pyproject.toml").read_bytes() == (
+            plugins[0] / "dependency" / "pyproject.toml").read_bytes()
+    else:
+        with pytest.raises(workspace.InstallError, match="conflicting buildable plugin project"):
+            workspace._generate_pyproject(inputs, root, source=core, python=Path(sys.executable))
+        for identity in identities:
+            member = root / "plugin-sources" / workspace._member_key(identity)
+            document = tomllib.loads((member / "pyproject.toml").read_text())
+            expected = (identity / "../dependency").resolve() if binding == "external-relative" else shared
+            assert document["tool"]["uv"]["sources"]["local-dep"]["path"] == expected.as_posix()
+    assert [(plugin / "pyproject.toml").read_bytes() for plugin in plugins] == before
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("links", [
+    "internal-file", "internal-directory", "file-vs-link", "directory-targets",
+    "external-file", "external-directory", "relative-escape", "dangling", "cycle",
+])
+def test_buildable_coalescing_preserves_link_semantics(tmp_path, duplicate_buildable_inputs, links):
+    import tomllib
+
+    core, plugins = duplicate_buildable_inputs
+    outside = tmp_path / "outside"
+    if links == "external-directory":
+        outside.mkdir()
+        (outside / "payload").write_text("external input\n", encoding="utf-8")
+    else:
+        outside.write_text("external input\n", encoding="utf-8")
+    for index, plugin in enumerate(plugins):
+        link = plugin / "link"
+        if links == "file-vs-link" and index == 0:
+            link.write_text("replay_plugin/values.py", encoding="utf-8")
+            continue
+        target = {
+            "internal-file": "replay_plugin/values.py",
+            "internal-directory": "replay_plugin",
+            "file-vs-link": "replay_plugin/values.py",
+            "directory-targets": "replay_plugin" if index == 0 else "build",
+            "external-file": outside,
+            "external-directory": outside,
+            "relative-escape": "../outside",
+            "dangling": "missing",
+            "cycle": "link",
+        }[links]
+        link.symlink_to(target, target_is_directory=links in {
+            "internal-directory", "directory-targets", "external-directory",
+        })
+
+    root = tmp_path / "workspace"
+    if links in {"internal-file", "internal-directory"}:
+        workspace._generate_pyproject(plugins, root, source=core, python=Path(sys.executable))
+        [relative] = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
+        link = root / relative / "link"
+        assert link.is_symlink()
+        assert link.resolve().is_relative_to(root / relative)
+        payload = link / "values.py" if links == "internal-directory" else link
+        assert payload.read_text() == "VALUE = 'recorded plugin bytes'\n"
+    else:
+        with pytest.raises(workspace.InstallError, match="conflicting buildable plugin project"):
+            workspace._generate_pyproject(plugins, root, source=core, python=Path(sys.executable))
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("relative, bit", [("replay_plugin/values.py", 0o100), ("replay_plugin", 0o020)])
+def test_buildable_coalescing_preserves_input_modes(tmp_path, duplicate_buildable_inputs, relative, bit):
+    core, plugins = duplicate_buildable_inputs
+    changed = plugins[1] / relative
+    changed.chmod(changed.stat().st_mode ^ bit)
+    modes = [(plugin / relative).stat().st_mode for plugin in plugins]
+
+    with pytest.raises(workspace.InstallError, match="conflicting buildable plugin project"):
+        workspace._generate_pyproject(plugins, tmp_path / "workspace", source=core, python=Path(sys.executable))
+
+    assert [(plugin / relative).stat().st_mode for plugin in plugins] == modes
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("buildable", [False, True])
+def test_metadata_rewrites_do_not_follow_links_into_source(tmp_path, buildable):
+    import tomllib
+
+    metadata = tmp_path / "source-pyproject.toml"
+    text = '[project]\nname="linked-plugin"\nversion="1"\ndependencies=["hermes-agent"]\n'
+    if buildable:
+        text += '[build-system]\nrequires=[]\nbuild-backend="backend"\n'
+    metadata.write_text(text, encoding="utf-8")
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "pyproject.toml").symlink_to(metadata)
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    member = workspace._workspace_member(plugin, root, identity=plugin)
+
+    assert metadata.read_text() == text
+    assert (plugin / "pyproject.toml").is_symlink()
+    assert not (member / "pyproject.toml").is_symlink()
+    assert tomllib.loads((member / "pyproject.toml").read_text())["project"]["dependencies"] == []
+
+
 def test_real_build_inputs_stay_in_generated_root(tmp_path, monkeypatch):
     core = tmp_path / "core"
     core.mkdir()
@@ -94,6 +271,8 @@ def test_repair_replays_saved_in_tree_build_backend(tmp_path):
     )
     _buildable_source(plugin)
     inputs = {p.relative_to(plugin): p.read_bytes() for p in plugin.rglob("*") if p.is_file()}
+    other_plugin = tmp_path / "profile-plugin"
+    shutil.copytree(plugin, other_plugin)
     uv = shutil.which("uv")
     assert uv, "saved backend replay test requires real uv"
     saved, repaired = tmp_path / "saved", tmp_path / "repaired"
@@ -101,7 +280,7 @@ def test_repair_replays_saved_in_tree_build_backend(tmp_path):
         uv=Path(uv), python=Path(sys.executable), destination=tmp_path / "initial-env",
         cache=tmp_path / "initial-cache", env=dict(os.environ), offline=True,
     )
-    workspace.lock_and_sync([plugin], [], root=saved, source=core, seed_lock=None,
+    workspace.lock_and_sync([plugin, other_plugin], [], root=saved, source=core, seed_lock=None,
                             environment=initial)
     [relative] = tomllib.loads((saved / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
     assert all((saved / relative / path).read_bytes() == data for path, data in inputs.items())
@@ -113,12 +292,14 @@ def test_repair_replays_saved_in_tree_build_backend(tmp_path):
     (plugin / "plugin.yaml").write_text("damaged [", encoding="utf-8")
     (plugin / "build/backend.py").unlink()
     (plugin / "replay_plugin/values.py").write_text("raise RuntimeError('damaged live source')\n", encoding="utf-8")
+    (other_plugin / "pyproject.toml").write_text("damaged [", encoding="utf-8")
+    (other_plugin / "build/backend.py").unlink()
     repair = PythonEnvironment(
         uv=Path(uv), python=Path(sys.executable), destination=tmp_path / "repair-env",
         # A fresh cache forces uv to invoke the saved backend again, not reuse a wheel.
         cache=tmp_path / "repair-cache", env=dict(os.environ), offline=True,
     )
-    workspace.lock_and_sync([plugin], [], root=repaired, source=core, seed_lock=None,
+    workspace.lock_and_sync([plugin, other_plugin], [], root=repaired, source=core, seed_lock=None,
                             replay=saved, environment=repair)
     assert (repaired / "uv.lock").read_bytes() == saved_lock
     assert (saved / "uv.lock").read_bytes() == saved_lock
@@ -134,6 +315,8 @@ def test_repair_replays_saved_in_tree_build_backend(tmp_path):
     assert (plugin / "pyproject.toml").read_text() == "damaged ["
     assert (plugin / "plugin.yaml").read_text() == "damaged ["
     assert not (plugin / "build/backend.py").exists()
+    assert (other_plugin / "pyproject.toml").read_text() == "damaged ["
+    assert not (other_plugin / "build/backend.py").exists()
 
 
 def test_source_refresh_does_not_need_metadata_change_and_refuses_live_root(tmp_path, monkeypatch):

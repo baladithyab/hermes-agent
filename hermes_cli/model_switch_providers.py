@@ -103,12 +103,16 @@ def _fetch_picker_live_models(
     )
 
     if callable(api_key):
-        # Let the catalog cache decide whether any token or network I/O is needed.
-        return cached_fetch_api_models(
-            api_key, api_url, timeout=timeout, headers=headers, api_mode=api_mode,
-            fetch_models=lambda: _fetch_picker_live_models(
-                materialize_probe_api_key(api_key), api_url, native_catalog_provider,
-                preserve_native_models, headers, timeout, api_mode, cache=False))
+        if cache:
+            # Let the catalog cache decide whether any token or network I/O is needed.
+            return cached_fetch_api_models(
+                api_key, api_url, timeout=timeout, headers=headers, api_mode=api_mode,
+                fetch_models=lambda: _fetch_picker_live_models(
+                    api_key, api_url, native_catalog_provider,
+                    preserve_native_models, headers, timeout, api_mode, cache=False))
+        api_key = materialize_probe_api_key(api_key)
+        if not api_key:
+            return None
 
     candidate_headers = _get_ollama_native_headers(api_url, api_key=api_key)
 

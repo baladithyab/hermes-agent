@@ -770,7 +770,7 @@ class TestValidateCustomUnreachableFallback:
     @pytest.mark.parametrize("api_mode", [None, "codex_responses"])
     def test_unreachable_catalog_still_rejects_other_api_modes(self, api_mode):
         result = self._validate("my-proxy-model", "custom", models=None, api_mode=api_mode)
-        assert result["accepted"] is False
+        assert (result["accepted"], result["persist"], result["recognized"]) == (False, True, False)
         assert "was not saved" in result["message"]
         # A reachable catalog keeps authoritative validation regardless of mode.
         assert self._validate("my-model", "custom", models=["my-model"], api_mode="chat_completions")["recognized"] is True

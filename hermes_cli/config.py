@@ -1933,11 +1933,10 @@ def _write_config_state(
 ) -> None:
     """Shared comment-preserving config writer; omission policy is selected by the public wrapper."""
     _refuse_failed_read(config_path, data)
+    # Guard reads must preserve the caller's remote-config read base.
+    from hermes_cli.config_backend import keeping_read_base
+    existing = keeping_read_base(lambda: require_readable_config_before_write(config_path))
     if not allow_omissions:
-        # A guard read, not the caller's read: *data* came from the caller's own earlier read, so a
-        # Remote Config save must still be diffed against THAT read, not a poll that landed since.
-        from hermes_cli.config_backend import keeping_read_base
-        existing = keeping_read_base(lambda: require_readable_config_before_write(config_path))
         omitted = _omitted_config_paths(existing, data)
         if omitted:
             shown = ", ".join(omitted[:12])
@@ -1951,6 +1950,8 @@ def _write_config_state(
                 "Pass the complete current config, or use atomic_config_replace() only when "
                 "deletion by omission is deliberate.",
             ) from exc
+    from hermes_cli.plugin_policy_epoch import record_policy_write
+    record_policy_write(config_path.parent, existing, data)
     write_config_document(config_path, data, extra_content_on_create=extra_content_on_create)
 
 

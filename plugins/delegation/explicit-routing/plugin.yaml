@@ -1,0 +1,5 @@
+name: explicit-routing
+version: 1.0.0
+description: "Operator-authorized per-task model and provider choices through the delegation provider interface."
+author: Codeseys
+kind: backend

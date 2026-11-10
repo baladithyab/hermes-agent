@@ -572,6 +572,8 @@ def _dashboard_plugin_search_dirs() -> list[tuple]:
 
 
 def _dashboard_plugin_entry(data: dict[str, Any], name: str, dashboard_dir: Path, source: str) -> dict[str, Any]:
+    from hermes_cli.plugin_api_limits import parse_plugin_api_limits
+    parse_plugin_api_limits(data)
     # Tab options: ``path`` + ``position`` for a new tab, optional ``override`` to replace a
     # built-in route, and ``hidden`` to register component/slots without adding a tab.
     raw_tab = data.get("tab", {}) if isinstance(data.get("tab"), dict) else {}
@@ -609,6 +611,7 @@ def _dashboard_plugin_entry(data: dict[str, Any], name: str, dashboard_dir: Path
         "source": source,
         "_dir": str(dashboard_dir),
         "_api_file": safe_api,
+        "_trusted_context": data.get("request_context") == 1,
     }
 
 
@@ -1027,15 +1030,8 @@ def _mount_hosted_plugin_api(app, plugin: dict, api_file_name: str) -> None:
         target = await asyncio.to_thread(_hosted_plugin_for_request, name)
         if target is None:
             return JSONResponse({"detail": f"plugin {name!r} is not enabled in this profile"}, status_code=404)
-        host, dashboard_dir, api_file = target
-        from hermes_cli.web_server_plugin_profiles import run_hosted_request
-        query, headers = request.url.query, [(k, v) for k, v in request.headers.items() if k.lower() != "host"]
-        body = await request.body()
-        from hermes_cli.plugin_host_http_auth import admitted_for_sensitive_route
-        authenticated = admitted_for_sensitive_route(request)
-        return await run_hosted_request(host.home, name, lambda timeout: host.asgi_request(
-            name, dashboard_dir, api_file, request.method, "/" + path, query, headers, body,
-            timeout=timeout, authenticated=authenticated))
+        from hermes_cli.plugin_http_forward import forward_hosted_plugin
+        return await forward_hosted_plugin(request, plugin, target, path, _hosted_plugin_for_request)
 
     app.add_api_route(f"/api/plugins/{name}/{{path:path}}", forward, include_in_schema=False,
                       methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
@@ -1048,7 +1044,8 @@ def _hosted_plugin_for_request(name: str) -> Optional[tuple]:
     when that profile has no enabled user copy of it."""
     from hermes_cli.plugins import get_plugin_manager
     from hermes_cli.plugins_cmd import _get_disabled_set, _get_enabled_set
-    for plugin in _discover_dashboard_plugins():
+    from hermes_cli.web_server import _get_dashboard_plugins
+    for plugin in _get_dashboard_plugins():
         if plugin.get("name") != name or not plugin.get("_api_file") or plugin.get("source") != "user":
             continue
         if _plugin_api_mount_skip_reason(plugin, _get_enabled_set(), _get_disabled_set()):

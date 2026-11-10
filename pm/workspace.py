@@ -134,9 +134,69 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
         shutil.copy2(entry, target)
 
 
+def _buildable_member_stamp(member: Path) -> str | None:
+    """Compare complete staged inputs; external bindings cannot prove equivalence.
+
+    members_stamp tracks installed identities, and store.tree_digest omits modes
+    and empty directories. Neither distinguishes all build inputs needed here.
+    """
+    import stat
+    import tomllib
+
+    from pm.filesystem import is_junction
+
+    member = member.resolve()
+    document = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8-sig"))
+    for sources in document.get("tool", {}).get("uv", {}).get("sources", {}).values():
+        for spec in sources if isinstance(sources, list) else [sources]:
+            if not isinstance(spec, dict) or "path" not in spec:
+                continue
+            try:
+                dependency = (member / spec["path"]).resolve(strict=True)
+            except (OSError, RuntimeError):
+                return None
+            if not dependency.is_relative_to(member):
+                return None
+
+    digest = hashlib.sha256()
+    digest.update(str(member.stat().st_mode).encode("ascii") + b"\0")
+    pending = [member]
+    while pending:
+        for path in sorted(pending.pop().iterdir()):
+            mode = path.lstat().st_mode
+            if is_junction(path):
+                return None
+            digest.update(os.fsencode(path.relative_to(member).as_posix()) + b"\0")
+            digest.update(str(mode).encode("ascii") + b"\0")
+            if stat.S_ISLNK(mode):
+                target = os.readlink(path)
+                # A relative link must stay inside this snapshot both lexically
+                # and after resolution. Never follow external or broken inputs.
+                if os.path.isabs(target) or not Path(os.path.abspath(path.parent / target)).is_relative_to(member):
+                    return None
+                try:
+                    resolved = path.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return None
+                if not resolved.is_relative_to(member):
+                    return None
+                digest.update(os.fsencode(target))
+            elif stat.S_ISDIR(mode):
+                pending.append(path)
+            elif stat.S_ISREG(mode):
+                with path.open("rb") as stream:
+                    digest.update(hashlib.file_digest(stream, "sha256").digest())
+            else:
+                return None
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Path, *, source: Path,
                         python: Path, extras: Iterable[str] = ()) -> None:
     """Snapshot core and plugin build inputs into a fresh generation for the *python* that installs it."""
+    import tomllib
+
     source = source.resolve()
     if root.resolve() == source or source.is_relative_to(root.resolve()):
         raise InstallError("venv", "workspace must not replace the core source")
@@ -148,12 +208,39 @@ def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Pat
     candidates = {identity: source for identity, source in member_sources(plugin_dirs).items()
                   if _is_member_candidate(source)}
     target = _target_environment(python) if candidates else {}
-    members = [_workspace_member(source, root, identity=identity, extras=extras, target=target)
-               .relative_to(root).as_posix() for identity, source in candidates.items()]
+    members = []
+    buildable: dict[str, tuple[Path, Path, str | None]] = {}
+    for identity, plugin_source in candidates.items():
+        member = _workspace_member(plugin_source, root, identity=identity, extras=extras, target=target)
+        document = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8-sig"))
+        if "build-system" in document or document.get("tool", {}).get("uv", {}).get("package") is True:
+            from packaging.utils import canonicalize_name
+
+            name = canonicalize_name(document["project"]["name"])
+            if name in buildable:
+                previous, previous_identity, stamp = buildable[name]
+                if stamp is None:
+                    stamp = _buildable_member_stamp(previous)
+                if stamp is None or stamp != _buildable_member_stamp(member):
+                    raise InstallError(
+                        "venv", f"conflicting buildable plugin project '{name}': "
+                        f"{previous_identity} and {identity} have different or externally bound staged inputs",
+                        remedy="use identical self-contained plugin sources for this project in every home",
+                    )
+                # Only the dependency workspace is shared. Home selections and
+                # installed plugin identities still belong to their own callers.
+                from pm.filesystem import remove_tree
+
+                for directory, _dirs, _files in os.walk(member, followlinks=False):
+                    path = Path(directory)
+                    path.chmod(path.stat().st_mode | 0o700)
+                remove_tree(member)
+                buildable[name] = (previous, previous_identity, stamp)
+                continue
+            buildable[name] = (member, identity, None)
+        members.append(member.relative_to(root).as_posix())
 
     if members:
-        import tomllib
-
         import tomli_w
 
         document = tomllib.loads(core_text)
@@ -650,7 +737,10 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path, extras: I
         if virtual or changed:
             import tomli_w
 
-            (member / "pyproject.toml").write_text(tomli_w.dumps(document), encoding="utf-8")
+            target = member / "pyproject.toml"
+            if target.is_symlink():
+                target.unlink()
+            target.write_text(tomli_w.dumps(document), encoding="utf-8")
         return member
     specs = declaration.install_requirements
     member = root / "plugin-deps" / key

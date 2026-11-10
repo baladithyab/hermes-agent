@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 from urllib.parse import parse_qsl, urlencode
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse, Response
 from starlette import status
 from starlette._utils import get_route_path
@@ -245,18 +246,17 @@ async def forward_secondary_plugin_request(request, name: str) -> Optional[Respo
     query = urlencode([(k, v) for k, v in parse_qsl(request.url.query, keep_blank_values=True)
                        if k not in _GATEWAY_QUERY_KEYS])
     headers = [(k, v) for k, v in request.headers.items() if k.lower() not in _GATEWAY_CREDENTIAL_HEADERS]
-    body = await request.body()
-    from hermes_cli.plugin_host_http_auth import admitted_for_sensitive_route
-    authenticated = admitted_for_sensitive_route(request)
-
-    def call(timeout: float) -> dict[str, Any]:
-        from hermes_cli.plugins import get_plugin_manager
-        host = get_plugin_manager()._plugin_host()  # the active (secondary) profile's own host
-        return host.asgi_request(name, str(plugin["_dir"]), str(plugin["_api_file"]), request.method, path,
-                                 query, headers, body, timeout=timeout, authenticated=authenticated)
-
     try:
-        return await run_hosted_request(home, name, call)
+        from hermes_cli.plugin_http_forward import forward_hosted_plugin
+        from hermes_cli.plugins import get_plugin_manager
+        from hermes_cli.web_server_dashboard import _hosted_plugin_for_request
+        host = get_plugin_manager()._plugin_host()
+        target = (host, str(plugin["_dir"]), str(plugin["_api_file"]))
+        return await forward_hosted_plugin(request, plugin, target, path.lstrip('/'),
+                                          _hosted_plugin_for_request, query=query, headers=headers)
+    except HTTPException:
+        # Selection/authentication refusals retain their status and remain inert.
+        raise
     except Exception as exc:  # health: allow BLE001 -- the host runs third-party code; any failure is this request's 502
         _log.warning("Plugin %s: its profile's plugin host could not serve %s: %s", name, path, exc)
         return JSONResponse({"detail": f"plugin {name!r} could not run in this profile's plugin host"},

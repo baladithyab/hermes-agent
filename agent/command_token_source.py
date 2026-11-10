@@ -90,7 +90,7 @@ def _mint(command: str, label: str) -> tuple[str, Optional[float]]:
                     f"key_cmd for provider {label!r} returned JSON without an 'access_token' field"
                 )
             ttl = payload.get("expires_in")
-            if isinstance(ttl, (int, float)) and ttl > 0:
+            if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) and ttl >= 0:
                 return token, float(ttl)
             # CLI helpers often print an absolute ISO 8601 deadline instead of OAuth's relative
             # lifetime; honour it or the token 401s once past. Lazy import: hermes_cli.auth imports agent.*.
@@ -117,6 +117,7 @@ def _mint(command: str, label: str) -> tuple[str, Optional[float]]:
 class CommandTokenSource:
     """Callable returning a bearer token, cached until shortly before expiry."""
 
+    supports_single_request_grants = True
     hermes_credential_source = KEY_CMD  # display label source; read without calling (agent.credential_source)
 
     def __init__(self, command: str, label: str = "custom") -> None:
@@ -137,8 +138,11 @@ class CommandTokenSource:
                 return self._token
             token, ttl = _mint(self._command, self._label)
             self._token = token
+            # Explicit zero means single-request grant; never cache a revoked
+            # capability merely because the generic helper default is 15 minutes.
             self._expires_at = time.monotonic() + (
-                max(ttl - _TOKEN_REFRESH_LEEWAY_SECONDS, 5.0) if ttl else _NO_TTL_REFRESH_SECONDS
+                0.0 if ttl == 0 else max(ttl - _TOKEN_REFRESH_LEEWAY_SECONDS, 5.0)
+                if ttl is not None else _NO_TTL_REFRESH_SECONDS
             )
             logger.debug(
                 "Minted key_cmd token for provider %s (ttl=%s)",

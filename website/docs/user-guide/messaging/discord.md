@@ -770,7 +770,7 @@ Disabling the size cap (`max_attachment_bytes: 0`) means a user can drop a multi
 
 ## Interactive Prompts (clarify)
 
-When the agent calls the `clarify` tool — to ask which approach you prefer, get post-task feedback, or check before a non-trivial decision — Discord renders the question with **one button per choice**:
+When the agent calls the `clarify` tool to ask a single-select question, Discord renders **one button per choice**:
 
 > Which framework should I use for the dashboard?
 >
@@ -778,7 +778,9 @@ When the agent calls the `clarify` tool — to ask which approach you prefer, ge
 
 Click a numbered button to answer, or click **Other** to type a free-form response (the next message you send in that channel becomes the answer). Open-ended `clarify` calls (no preset choices) skip the buttons and just capture your next message.
 
-The buttons disable themselves once a choice is made so duplicate clicks don't double-resolve the prompt. Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `3600` seconds; `0` or less = unlimited). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and adapts rather than hanging. Reply `skip` to skip a question.
+Multi-select questions use a native dropdown instead. Select all the options you want in one submission, or click **Other** for a custom typed answer. The dropdown supports up to 25 options; the clarify tool still applies its own choice limit before rendering.
+
+The controls disable once an answer is submitted so duplicate clicks don't resolve the prompt twice. When the controls expire, Discord releases the waiting agent before attempting to grey out the embed, even if the message was deleted or cannot be edited. Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `3600` seconds; `0` or less = unlimited). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and continues. Reply `skip` to skip a question.
 
 ### Prompt layout
 
