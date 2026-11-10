@@ -31,7 +31,7 @@ def _installed_entry_point(tmp_path, *, manifest=None, editable=False):
         else:
             records.append("sample_plugin/plugin.yaml,,\n")
     (dist_dir / "RECORD").write_text("".join(records), encoding="utf-8")
-    return metadata.PathDistribution(dist_dir).entry_points[0]
+    return next(iter(metadata.PathDistribution(dist_dir).entry_points))
 
 
 @pytest.fixture

@@ -19,6 +19,35 @@ def _allowed_selections(selection: Any) -> set[tuple[str, str]] | None:
     return allowed
 
 
+def _authorize_fallbacks(route: Mapping[str, Any], allowed: set[tuple[str, str]] | None) -> None:
+    """Bound configured and effective fallback pairs without resolving credentials."""
+    if allowed is None:
+        return
+    from hermes_cli.models import normalize_provider
+    from hermes_cli.model_normalize import normalize_model_for_provider
+
+    raw = route.get('fallback_providers') or []
+    entries = [raw] if isinstance(raw, Mapping) else raw
+    if not isinstance(entries, list):
+        raise DelegationRouteError('Selection policy requires a list of named fallback routes.')
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise DelegationRouteError('Selection policy requires named fallback routes.')
+        provider, model = entry.get('provider'), entry.get('model')
+        if any(not isinstance(value, str) or not value.strip() for value in (provider, model)):
+            raise DelegationRouteError('Selection policy requires named fallback providers and models.')
+        if (provider, model) not in allowed:
+            raise DelegationRouteError('The configured fallback provider/model pair is not allowed by the selection policy.')
+        if any(entry.get(key) for key in ('base_url', 'api_key', 'key_env', 'api_key_env')):
+            raise DelegationRouteError('Allowlisted fallbacks take endpoints and credentials from their owning providers.')
+        canonical_provider = normalize_provider(provider.strip().lower())
+        # The live binder uses a MoA preset id directly; every other route uses
+        # the shared normalizer, including provider-profile alias tables.
+        canonical_model = model.strip() if canonical_provider == 'moa' else normalize_model_for_provider(model, canonical_provider)
+        if (canonical_provider, canonical_model) not in allowed:
+            raise DelegationRouteError('The canonical fallback provider/model pair is not allowed by the selection policy.')
+
+
 def resolve_model_selection(route: Mapping[str, Any], parent_agent: Any) -> dict[str, Any]:
     """Retain the selector's whole route, including callable keys and alias endpoints.
 
@@ -37,6 +66,7 @@ def resolve_model_selection(route: Mapping[str, Any], parent_agent: Any) -> dict
         raise DelegationRouteError('model_selection requires a named provider and model.')
     if any(route.get(key) is not None for key in ('base_url', 'api_key', 'api_mode', 'request_overrides')):
         raise DelegationRouteError('model_selection takes its endpoint and credentials from the owning provider.')
+    _authorize_fallbacks(route, allowed)
     full = load_config_readonly()
     result = switch_model(
         raw_input=model, current_provider='', current_model='', explicit_provider=provider,

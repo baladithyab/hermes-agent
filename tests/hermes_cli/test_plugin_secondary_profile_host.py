@@ -485,38 +485,53 @@ _HANG_API = _HOME_API + '''
 @router.get("/hang")
 async def hang():
     import asyncio
+    from pathlib import Path
+    with Path(__file__).with_suffix(".hang-entered").open("a") as entered:
+        entered.write("once\\n")
     await asyncio.Event().wait()
 '''
 
 
 @pytest.mark.platforms("posix")  # the host is a real child process
-def test_hung_hosted_request_answers_504_and_the_host_serves_the_next(daemon, monkeypatch):
+def test_hung_hosted_request_reaps_captured_host_without_replay(daemon, monkeypatch):
     from hermes_cli import web_server_plugin_profiles
+    from hermes_cli.plugin_host_wire import PluginHostUnavailable
+    from hermes_cli.web_server_profiles import _config_profile_scope
     monkeypatch.setattr(PluginHost, "asgi_request", _REAL_ASGI_REQUEST)
-    monkeypatch.setattr(web_server_plugin_profiles, "HOSTED_REQUEST_TIMEOUT_SECS", 1.0, raising=False)
     _beta_plugin(daemon)
-    (daemon.beta / "plugins" / NAME / "dashboard" / "plugin_api.py").write_text(_HANG_API)
+    api = daemon.beta / "plugins" / NAME / "dashboard" / "plugin_api.py"
+    api.write_text(_HANG_API)
     selected = {"params": {"profile": "beta"}, "headers": daemon.owner}
     whoami, hang = f"/api/plugins/{NAME}/whoami", f"/api/plugins/{NAME}/hang"
 
     async def scenario():
         async with _asgi_client() as client:
             try:
+                # Warm cold host/ASGI imports before measuring only the hanging request.
                 before = await client.get(whoami, **selected)
-                try:
-                    hung = await asyncio.wait_for(client.get(hang, **selected), 20)
-                except TimeoutError:
-                    hung = None
+                assert before.status_code == 200, before.text
+                with _config_profile_scope("beta"):
+                    host = plugins_mod.get_plugin_manager()._plugin_host()
+                process = host._proc
+                assert process is not None and process.pid == before.json()["pid"]
+                monkeypatch.setattr(web_server_plugin_profiles, "HOSTED_REQUEST_TIMEOUT_SECS", 1.0)
+                hung = await asyncio.wait_for(client.get(hang, **selected), 20)
+                assert hung.status_code == 504 and NAME in hung.json()["detail"]
+                # HTTP may time out just before the RPC worker finishes containment.
+                await asyncio.to_thread(process.wait, timeout=10)
+                assert not host.alive and host._proc is process
                 after = await client.get(whoami, **selected)
+                assert after.status_code == 502, after.text
+                with pytest.raises(PluginHostUnavailable, match="deadline"):
+                    host.ensure_started()
+                with _config_profile_scope("beta"):
+                    assert plugins_mod.get_plugin_manager()._plugin_host() is host
+                assert host._proc is process and host.pid == process.pid
+                assert api.with_suffix(".hang-entered").read_text() == "once\n"
             finally:
-                _shutdown_hosts()  # also frees a request still parked on the host
-        return before, hung, after
+                _shutdown_hosts()
 
-    before, hung, after = asyncio.run(scenario())
-    assert hung is not None, "a hung plugin request never answered"
-    assert hung.status_code == 504 and NAME in hung.json()["detail"]
-    assert (before.status_code, after.status_code) == (200, 200)
-    assert after.json()["pid"] == before.json()["pid"]  # the same host, not a restarted one
+    asyncio.run(scenario())
 
 
 @pytest.mark.platforms("posix")  # the hosts are real child processes

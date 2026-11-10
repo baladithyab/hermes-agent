@@ -413,6 +413,9 @@ canonical operator-config normalization, including trusted endpoint, credential
 source and request settings. Every effective pair must satisfy any configured
 extra allowlist, disabled-provider gates and supported effort. Malformed or
 policy-denied fallback entries refuse the task rather than silently drop policy.
+With an extra allowlist, both each configured fallback pair and its normalized
+pair must be allowed. Such fallbacks use the named provider's configured
+endpoint and credential source; fallback-level endpoint or key overrides are refused.
 These trusted config fields never become task-selectable fields. An absent
 chain or `[]` gives an explicit selection no fallback and never borrows the
 parent's fallback chain. Explicit choices also do not borrow

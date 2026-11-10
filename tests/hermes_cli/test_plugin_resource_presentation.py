@@ -201,6 +201,8 @@ def test_declared_resource_capability_preserves_ordinary_limits():
 def test_registration_captures_authenticated_profile_and_host_incarnation(tmp_path, monkeypatch):
     import contextvars
     from dataclasses import asdict
+    from fastapi import FastAPI
+    from hermes_cli import web_server
     from hermes_cli import plugin_resource_presentation as module
     from hermes_cli import plugin_request_context, plugin_policy_incarnation
     from hermes_cli.dashboard_auth import prefix
@@ -234,6 +236,8 @@ def test_registration_captures_authenticated_profile_and_host_incarnation(tmp_pa
     payload = {'document_id': DOCUMENT, 'grant_id': GRANT, 'entry_path': ENTRY, 'expires_at': 1300}
     scope = request_scope()
     scope['method'] = 'POST'
+    scope['app'] = FastAPI()
+    scope['headers'].append((web_server._SESSION_HEADER_NAME.lower().encode(), web_server._SESSION_TOKEN.encode()))
     async def receive():
         return {'type': 'http.request', 'body': json.dumps(payload).encode(), 'more_body': False}
     registered = asyncio.run(module.registration(Request(scope, receive), 'demo', target, context, resolver, '_host/resource/open'))
@@ -245,6 +249,7 @@ def test_registration_captures_authenticated_profile_and_host_incarnation(tmp_pa
     assert observed[0][:5] == ('alpha', 'POST', '/console/resource', '', [('content-type', 'application/json')])
     assert observed[0][5]['query'] == [['profile', 'beta']]
     assert observed[0][6]['trusted_context'] == context
+    assert observed[0][6]['authenticated'] is True
     host._generation = 2
     assert asyncio.run(registry.fetch(presentation.netloc, 'http', 'GET', ENTRY, '', '')).status_code == 410
     assert len(observed) == 1

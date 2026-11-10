@@ -209,6 +209,10 @@ def test_existing_provider_and_canonical_model_gates_remain(environment, change)
 def test_trusted_configured_fallback_chain_is_preserved(environment, fallback):
     from hermes_cli.fallback_config import get_fallback_chain
     from tools.delegate_tool_config import _resolve_child_fallback_chain
+    rows = fallback if isinstance(fallback, list) else [fallback]
+    if any(any(row.get(key) for key in ('base_url', 'api_key', 'key_env', 'api_key_env')) for row in rows):
+        # Unrestricted operator config retains its existing endpoint/key override behavior.
+        environment.cfg['delegation']['backends'] = {}
     environment.cfg['delegation']['fallback_providers'] = fallback
     environment.load()
     route, = _routes(environment, [{'goal': 'allowed fallback', 'route': _A}])
