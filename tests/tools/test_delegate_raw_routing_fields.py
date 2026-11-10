@@ -9,7 +9,11 @@ import json
 import pytest
 
 from tests.tools.test_delegation_route_fields import _construct
-from tests.tools.test_explicit_delegation_routing import _B, _parent, environment
+from tests.tools import test_explicit_delegation_routing as explicit_routing
+
+_B = explicit_routing._B
+_parent = explicit_routing._parent
+environment = explicit_routing.environment
 
 pytestmark = pytest.mark.platforms('posix')
 _FIELDS = ['provider', 'model', 'base_url', 'api_key', 'api_mode']
