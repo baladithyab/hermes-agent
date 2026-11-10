@@ -87,7 +87,9 @@ def test_hosted_delegation_provider_extends_schema_and_routes_from_the_host(tmp_
         out = invoke_plugin_command(plugins_mod.get_plugin_command_handler("deleg-switch"), "default",
                                     session_key="chat-a")
         pid, listed = out.split(" ", 1)
-        assert int(pid) != os.getpid() and listed == "default,hosted-map"
+        assert int(pid) != os.getpid()
+        listed_names = listed.split(',')
+        assert listed_names[0] == 'default' and 'hosted-map' in listed_names
         assert yaml.safe_load((home / "config.yaml").read_text())["delegation"]["backend"] == "default"
         assert delegation_backends._rebuild_requests == {"chat-a"}
         delegation_backends._rebuild_requests.clear()

@@ -10,6 +10,7 @@ import pytest
 
 from hermes_cli import plugins as plugins_mod
 from hermes_cli.plugins import PluginManager
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
 
 PROBE_PLUGIN = '''
 import json, os
@@ -70,14 +71,17 @@ def test_plugin_runs_out_of_process_with_ctx_round_trips_and_survives_host_crash
 
     _home_with_plugins(tmp_path, monkeypatch, {"hostprobe": PROBE_PLUGIN, "platformprobe": PLATFORM_PLUGIN})
     manager = PluginManager()
-    manager.discover_and_load()
+    host = manager._plugin_host()
     try:
+        readiness = warm_host_infrastructure(host, tmp_path / "host-infrastructure-ready",
+                                             modules=("agent.image_gen_provider",))
+        manager.discover_and_load()
         # The plugin's code never entered this interpreter, yet its registrations are ordinary.
         assert not any("hostprobe" in name for name in sys.modules)
         assert manager._plugins["hostprobe"].error is None
         first = json.loads(registry.dispatch("hostprobe_pid", {"x": 1}, scope=manager.scope_key))
         host_pid = first["pid"]
-        assert host_pid != os.getpid()
+        assert host_pid == readiness["pid"] != os.getpid()
         # A handler calling back into Hermes while Hermes waits on it (nested ctx.dispatch_tool).
         nested = json.loads(registry.dispatch("hostprobe_nested", {}, scope=manager.scope_key))
         assert nested["pid"] == host_pid and nested["x"] == "nested"
@@ -101,8 +105,10 @@ def test_plugin_runs_out_of_process_with_ctx_round_trips_and_survives_host_crash
             time.sleep(0.2)
         assert json.loads(result)["pid"] not in {host_pid, os.getpid()}
     finally:
-        manager.unload()
-        manager._plugin_host().shutdown()
+        try:
+            manager.unload()
+        finally:
+            host.shutdown()
 
 
 @pytest.mark.platforms("any")  # the host is a child process: its env/home resolution is per-OS

@@ -15,6 +15,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.gateway.native_readiness import wait_native_ready
 
 
 @contextmanager
@@ -26,11 +27,11 @@ def daemon(tmp_path):
         sibling = home / 'profiles' / name
         sibling.mkdir(parents=True, exist_ok=True)
         (sibling / 'config.yaml').write_text(json.dumps({
-            'model': {'provider': 'custom', 'default': 'sibling-' + name}}))
+            'model': {'provider': 'custom', 'default': 'sibling-' + name, 'context_length': 128000}}))
     (home / 'config.yaml').write_text(json.dumps({
         'gateway': {'multiplex_profiles': False},
         'model': {'provider': 'custom', 'default': 'native-http-fixture',
-                  'base_url': 'http://127.0.0.1:1/v1'},
+                  'base_url': 'http://127.0.0.1:1/v1', 'context_length': 128000},
         'auxiliary': {'title_generation': {'enabled': False}},
     }))
     root = Path(__file__).resolve().parents[2]
@@ -39,21 +40,11 @@ def daemon(tmp_path):
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
                HERMES_DASHBOARD_SESSION_TOKEN='normal-http-owner')
     with (tmp_path / 'gateway.log').open('w+') as log:
+        spawned_at = time.monotonic()
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + 40
-            descriptor = {}
-            while process.poll() is None and time.monotonic() < deadline:
-                try:
-                    descriptor = control(home, 'identify')
-                    if descriptor.get('state') == 'ready':
-                        break
-                except (OSError, ValueError):
-                    pass
-                time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            descriptor = wait_native_ready(process, home, control, spawned_at=spawned_at)
             yield home, descriptor
         finally:
             if process.poll() is None:

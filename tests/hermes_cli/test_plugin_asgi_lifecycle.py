@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from hermes_cli.plugins import PluginManager
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
 
 
 API = '''
@@ -46,13 +47,14 @@ def hosted(tmp_path, monkeypatch):
     dashboard.mkdir()
     (dashboard / 'plugin_api.py').write_text(API)
     host = PluginManager()._plugin_host()
-    # Start the transport before racing requests, so this test targets ASGI admission.
-    host.ensure_started()
     def ping():
         result = host.asgi_request('lifecycle', str(dashboard), 'plugin_api.py',
                                    'GET', '/ping', '', [], b'')
         return json.loads(result['body'])
     try:
+        warm_host_infrastructure(host, tmp_path / 'host-infrastructure-ready')
+        assert not (dashboard / 'events').exists()
+        assert not (dashboard / 'entered').exists()
         yield host, dashboard, ping
     finally:
         (dashboard / 'release-start').touch()

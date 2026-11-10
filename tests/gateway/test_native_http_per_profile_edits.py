@@ -21,6 +21,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.gateway.native_readiness import wait_native_ready
 
 
 def _seed(home, rows):
@@ -41,7 +42,8 @@ def test_per_profile_grants_edit_old_local_rows_of_their_own_profile(tmp_path):
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
     user.mkdir()
-    model = {'model': {'provider': 'custom', 'default': 'm', 'base_url': 'http://127.0.0.1:1/v1'},
+    model = {'model': {'provider': 'custom', 'default': 'm', 'base_url': 'http://127.0.0.1:1/v1',
+                       'context_length': 128000},
              'auxiliary': {'title_generation': {'enabled': False}}}
     (home / 'config.yaml').write_text(json.dumps({'gateway': {'multiplex_profiles': True}, **model}))
     beta = home / 'profiles' / 'beta'
@@ -55,20 +57,11 @@ def test_per_profile_grants_edit_old_local_rows_of_their_own_profile(tmp_path):
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                PYTHONUNBUFFERED='1')
     with (tmp_path / 'gateway.log').open('w+') as log:
+        spawned_at = time.monotonic()
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
-            deadline, descriptor = time.monotonic() + 60, {}
-            while process.poll() is None and time.monotonic() < deadline:
-                try:
-                    descriptor = control(home, 'identify')
-                    if descriptor.get('state') == 'ready':
-                        break
-                except (OSError, ValueError):
-                    pass
-                time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            descriptor = wait_native_ready(process, home, control, spawned_at=spawned_at)
             homes = {'default': str(home.resolve()), 'beta': str(beta.resolve())}
 
             def ticket(profile, purpose='native-http'):

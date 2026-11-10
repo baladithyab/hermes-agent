@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from tests.hermes_cli.test_plugin_host_request_context import API, network_client
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
 
 
 def test_two_profile_selection_aba_preserves_pinned_acceptance(tmp_path, monkeypatch):
@@ -34,6 +35,7 @@ def test_two_profile_selection_aba_preserves_pinned_acceptance(tmp_path, monkeyp
     routes = list(web_server.app.router.routes)
     web_server._dashboard_plugins_cache = None
     hosts = []
+    readiness = {}
     base = '/api/plugins/context-probe'
     try:
         with network_client(web_server.app) as client:
@@ -49,6 +51,12 @@ def test_two_profile_selection_aba_preserves_pinned_acceptance(tmp_path, monkeyp
                 value = response.json()
                 client.headers['X-Hermes-Plugin-Scope'] = value['scope_id']
                 client.headers['X-Hermes-Plugin-Epoch'] = str(value['epoch'])
+                if profile not in readiness:
+                    with _config_profile_scope(profile):
+                        host = get_plugin_manager()._plugin_host()
+                        assert host._home == homes[profile].resolve()
+                        readiness[profile] = warm_host_infrastructure(
+                            host, homes[profile] / 'host-infrastructure-ready')
                 return value
 
             first = select('current')
@@ -56,7 +64,7 @@ def test_two_profile_selection_aba_preserves_pinned_acceptance(tmp_path, monkeyp
             assert accepted.status_code == 200, accepted.text
             assert accepted.json()['home'] == str(home)
             first_scope = request('GET', '/scope', 'current').json()
-            assert first_scope['pid'] != os.getpid()
+            assert first_scope['pid'] == readiness['current']['pid'] != os.getpid()
             # A comparison token cannot authorize the other profile's handler.
             assert request('GET', '/scope', 'beta').status_code == 409
             second = select('beta')
@@ -65,6 +73,7 @@ def test_two_profile_selection_aba_preserves_pinned_acceptance(tmp_path, monkeyp
             assert other_scope.status_code == 200, other_scope.text
             other_scope = other_scope.json()
             assert other_scope['context']['home'] == str(homes['beta'])
+            assert other_scope['pid'] == readiness['beta']['pid']
             assert other_scope['pid'] not in (os.getpid(), first_scope['pid'])
             assert request('GET', '/scope', 'current').status_code == 409
             # Original accepted operation remains in A's actual subprocess and

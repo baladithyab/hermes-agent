@@ -30,6 +30,7 @@ from hermes_cli import plugins as plugins_mod
 from hermes_cli import web_server
 from hermes_cli.plugin_host import PluginHost
 from tests.hermes_cli import test_plugin_api_consent_gate as consent_gate
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
 
 daemon = consent_gate.daemon  # the multiplexed daemon stand-in fixture
 _install, _plugins, listed = consent_gate._install, consent_gate._plugins, consent_gate.listed
@@ -411,14 +412,24 @@ async def whoami():
 
 @pytest.mark.platforms("posix")  # the host is a real child process
 def test_secondary_plugin_runs_in_a_real_host_bound_to_its_home(daemon, monkeypatch):
+    from hermes_cli.web_server_profiles import _config_profile_scope
+
     monkeypatch.setattr(PluginHost, "asgi_request", _REAL_ASGI_REQUEST)
     imported = _beta_plugin(daemon)
     (daemon.beta / "plugins" / NAME / "dashboard" / "plugin_api.py").write_text(_HOME_API)
     try:
+        admitted = daemon.client.get('/api/dashboard/plugins', headers=daemon.beta_ticket())
+        assert admitted.status_code == 200
+        assert NAME in {plugin['name'] for plugin in admitted.json()}
+        with _config_profile_scope('beta'):
+            host = plugins_mod.get_plugin_manager()._plugin_host()
+            assert host._home == daemon.beta
+            readiness = warm_host_infrastructure(host, daemon.beta / 'host-infrastructure-ready',
+                                                 modules=('hermes_constants',))
         response = daemon.client.get(f"/api/plugins/{NAME}/whoami", headers=daemon.beta_ticket())
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["pid"] != os.getpid()
+        assert body["pid"] == readiness['pid'] != os.getpid()
         assert Path(body["home"]).resolve() == daemon.beta.resolve()
         assert _never_imported(imported)
     finally:
@@ -507,11 +518,19 @@ def test_hung_hosted_request_reaps_captured_host_without_replay(daemon, monkeypa
     async def scenario():
         async with _asgi_client() as client:
             try:
-                # Warm cold host/ASGI imports before measuring only the hanging request.
+                admitted = await client.get('/api/dashboard/plugins', **selected)
+                assert admitted.status_code == 200
+                assert NAME in {plugin['name'] for plugin in admitted.json()}
+                with _config_profile_scope('beta'):
+                    host = plugins_mod.get_plugin_manager()._plugin_host()
+                    assert host._home == daemon.beta
+                    readiness = await asyncio.to_thread(
+                        warm_host_infrastructure, host, daemon.beta / 'host-infrastructure-ready',
+                        modules=('hermes_constants',))
+                # Prove the actual route/profile before measuring only the hang.
                 before = await client.get(whoami, **selected)
                 assert before.status_code == 200, before.text
-                with _config_profile_scope("beta"):
-                    host = plugins_mod.get_plugin_manager()._plugin_host()
+                assert before.json()['pid'] == readiness['pid']
                 process = host._proc
                 assert process is not None and process.pid == before.json()["pid"]
                 monkeypatch.setattr(web_server_plugin_profiles, "HOSTED_REQUEST_TIMEOUT_SECS", 1.0)

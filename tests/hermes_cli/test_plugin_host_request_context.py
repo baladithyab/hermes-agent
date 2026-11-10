@@ -4,7 +4,6 @@ import os
 from contextlib import contextmanager, nullcontext
 import socket
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
@@ -12,6 +11,8 @@ import pytest
 import uvicorn
 
 from hermes_cli.plugins import PluginManager
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
+from tests.waiting import wait_until
 
 
 API = '''
@@ -49,6 +50,7 @@ def test_host_context_is_request_local_and_not_a_client_header(tmp_path, monkeyp
     manager = PluginManager()
     host = manager._plugin_host()
     try:
+        warm_host_infrastructure(host, tmp_path / 'host-infrastructure-ready')
         def call(epoch):
             context = {'version': 1, 'principal': 'generated-principal',
                        'home': str(home), 'selection_epoch': epoch}
@@ -102,6 +104,7 @@ def ping(): return {'ok': True}
                                    'GET', '/ping', '', [], b'')
         assert json.loads(result['body']) == {'ok': True}
     try:
+        warm_host_infrastructure(host, tmp_path / 'host-infrastructure-ready')
         ping('one')
         ping('two')
         ping('one')
@@ -122,19 +125,22 @@ def network_client(app):
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
     sock.listen(32)
-    server = uvicorn.Server(uvicorn.Config(app, log_level='critical', lifespan='off'))
+    server = uvicorn.Server(uvicorn.Config(app, log_level='critical', lifespan='off',
+                                         timeout_graceful_shutdown=65))
     thread = threading.Thread(target=server.run, kwargs={'sockets': [sock]}, daemon=True)
     thread.start()
     try:
-        deadline = time.monotonic() + 5
-        while not server.started and thread.is_alive() and time.monotonic() < deadline:
-            threading.Event().wait(.01)
+        wait_until(lambda: server.started or not thread.is_alive(), timeout=5,
+                   what='fixture HTTP server startup')
         assert server.started
-        with httpx.Client(base_url=f'http://127.0.0.1:{sock.getsockname()[1]}', timeout=5) as client:
+        # The client must observe the real server's 60s response budget before
+        # timing out, and teardown must permit that in-flight work to finish.
+        with httpx.Client(base_url=f'http://127.0.0.1:{sock.getsockname()[1]}',
+                          timeout=httpx.Timeout(70, connect=5)) as client:
             yield client
     finally:
         server.should_exit = True
-        thread.join(5)
+        thread.join(75)
         sock.close()
         assert not thread.is_alive()
 
@@ -145,6 +151,7 @@ def test_authenticated_http_enters_real_host_with_no_credentials(tmp_path, monke
     from hermes_cli import web_server
     from hermes_cli.config import load_config, save_config
     from hermes_cli.plugins import get_plugin_manager
+    from hermes_cli.web_server_profiles import _config_profile_scope
     from hermes_constants import get_hermes_home
 
     monkeypatch.setenv('HOME', str(tmp_path))
@@ -165,10 +172,17 @@ def test_authenticated_http_enters_real_host_with_no_credentials(tmp_path, monke
     try:
         assert client.get(url).status_code == 401
         client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+        admitted = client.get('/api/dashboard/plugins')
+        assert admitted.status_code == 200
+        assert 'context-probe' in {plugin['name'] for plugin in admitted.json()}
+        with _config_profile_scope('current'):
+            host = get_plugin_manager()._plugin_host()
+            assert host._home == home.resolve()
+            readiness = warm_host_infrastructure(host, home / 'host-infrastructure-ready')
         response = client.get(url, headers={'X-Hermes-Context': 'forged'})
         assert response.status_code == 200, response.text
         data = response.json()
-        assert data['pid'] != os.getpid()
+        assert data['pid'] == readiness['pid'] != os.getpid()
         assert data['context']['home'] == str(home.resolve())
         assert len(data['context']['principal']) == 64
         assert data['authorization'] is None
@@ -240,7 +254,9 @@ def test_authenticated_http_enters_real_host_with_no_credentials(tmp_path, monke
             'GET', '/revalidate', '', [], b'')
         assert json.loads(result['body']) == {'valid': False}
     finally:
-        transport.__exit__(None, None, None)
-        get_plugin_manager()._plugin_host().shutdown()
-        web_server.app.router.routes[:] = routes
-        web_server._dashboard_plugins_cache = None
+        try:
+            transport.__exit__(None, None, None)
+        finally:
+            get_plugin_manager()._plugin_host().shutdown()
+            web_server.app.router.routes[:] = routes
+            web_server._dashboard_plugins_cache = None

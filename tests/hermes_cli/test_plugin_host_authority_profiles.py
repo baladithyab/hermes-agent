@@ -5,6 +5,9 @@ import os
 import pytest
 
 from hermes_cli.plugin_host import PluginHost
+from hermes_cli.plugins import get_plugin_manager
+from hermes_cli.web_server_profiles import _config_profile_scope
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
 from tests.hermes_cli import test_plugin_secondary_profile_host as secondary
 
 daemon = secondary.daemon
@@ -47,6 +50,10 @@ def test_native_grant_selection_and_sensitive_admission_share_the_profile(daemon
     try:
         selection = daemon.client.post(base + '/_host/selection', headers=headers())
         assert selection.status_code == 200, selection.text
+        with _config_profile_scope('current' if profile == 'launch' else profile):
+            host = get_plugin_manager()._plugin_host()
+            assert host._home == home
+            readiness = warm_host_infrastructure(host, home / 'host-infrastructure-ready', web_server=True)
         selected = selection.json()
         selected_headers = {**headers(), 'X-Hermes-Plugin-Scope': selected['scope_id'],
                             'X-Hermes-Plugin-Epoch': str(selected['epoch'])}
@@ -54,7 +61,7 @@ def test_native_grant_selection_and_sensitive_admission_share_the_profile(daemon
         assert response.status_code == 200, response.text
         assert response.json() == {'pid': response.json()['pid'], 'home': str(home),
                                    'selection_home': str(home), 'credentials': []}
-        assert response.json()['pid'] != os.getpid()
+        assert response.json()['pid'] == readiness['pid'] != os.getpid()
         stale = {**headers(), 'X-Hermes-Plugin-Scope': selected['scope_id'],
                  'X-Hermes-Plugin-Epoch': str(selected['epoch'] + 1)}
         assert daemon.client.put(base + '/config', headers=stale).status_code == 409

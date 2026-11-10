@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli.plugin_host import PluginHost
+from hermes_cli.plugins import get_plugin_manager
+from hermes_cli.web_server_profiles import _config_profile_scope
+from tests.hermes_cli.plugin_host_readiness import warm_host_infrastructure
 from tests.hermes_cli import test_plugin_secondary_profile_host as secondary
 
 daemon = secondary.daemon
@@ -33,10 +36,18 @@ def test_secondary_guarded_mutation_uses_upstream_admission(daemon, monkeypatch)
     api.write_text(_API, encoding="utf-8")
     url = f"/api/plugins/{secondary.NAME}/config"
     try:
+        admitted = daemon.client.get('/api/dashboard/plugins', headers=daemon.beta_ticket())
+        assert admitted.status_code == 200
+        assert secondary.NAME in {plugin['name'] for plugin in admitted.json()}
+        with _config_profile_scope('beta'):
+            host = get_plugin_manager()._plugin_host()
+            assert host._home == daemon.beta
+            readiness = warm_host_infrastructure(host, daemon.beta / 'host-infrastructure-ready',
+                                                 web_server=True)
         response = daemon.client.put(url, headers=daemon.beta_ticket())
         assert response.status_code == 200, response.text
         assert response.json()["saved"] is True
-        assert response.json()["pid"] != os.getpid()
+        assert response.json()["pid"] == readiness['pid'] != os.getpid()
         assert response.json()["credentials"] == []
         assert daemon.client.put(url, params={"profile": "beta"}).status_code == 401
     finally:
@@ -54,6 +65,7 @@ def test_host_admission_does_not_leak_or_come_from_http_input(tmp_path):
     args = ("guard-probe", str(api), "plugin_api.py", "PUT", "/config", "authenticated=true",
             [("X-Hosted-Http-Authenticated", "true")], b'{"authenticated":true}')
     try:
+        warm_host_infrastructure(host, tmp_path / 'host-infrastructure-ready', web_server=True)
         assert host.asgi_request(*args, authenticated=True)["status"] == 200
         for marker in (False, None, "true", 1):
             assert host.asgi_request(*args, authenticated=marker)["status"] == 401
@@ -71,9 +83,17 @@ def test_launch_host_preserves_native_admission(daemon, monkeypatch):
     api = daemon.launch / "plugins" / "launch-guard" / "dashboard" / "plugin_api.py"
     api.write_text(_API, encoding="utf-8")
     try:
+        admitted = daemon.client.get('/api/dashboard/plugins', headers=daemon.owner)
+        assert admitted.status_code == 200
+        assert 'launch-guard' in {plugin['name'] for plugin in admitted.json()}
+        with _config_profile_scope('current'):
+            host = get_plugin_manager()._plugin_host()
+            assert host._home == daemon.launch
+            readiness = warm_host_infrastructure(host, daemon.launch / 'host-infrastructure-ready',
+                                                 web_server=True)
         response = daemon.client.put("/api/plugins/launch-guard/config", headers=daemon.owner)
         assert response.status_code == 200, response.text
-        assert response.json()["pid"] != os.getpid()
+        assert response.json()["pid"] == readiness['pid'] != os.getpid()
     finally:
         secondary._shutdown_hosts()
 
