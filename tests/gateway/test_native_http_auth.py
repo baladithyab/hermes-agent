@@ -15,7 +15,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from tests.gateway.test_normal_runtime_boot import control
-from tests.gateway.native_readiness import wait_native_ready
+from tests.gateway.native_readiness import wait_native_http_ready, wait_native_ready
 
 
 @contextmanager
@@ -45,6 +45,7 @@ def daemon(tmp_path):
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             descriptor = wait_native_ready(process, home, control, spawned_at=spawned_at)
+            wait_native_http_ready(process, home, control, descriptor)
             yield home, descriptor
         finally:
             if process.poll() is None:

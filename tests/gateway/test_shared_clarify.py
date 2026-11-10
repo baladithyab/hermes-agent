@@ -4,11 +4,22 @@ from pathlib import Path
 import subprocess
 import sys
 import json
+import signal
+
+from tests.waiting import wait_until
 
 
 # 90s cold setup +8x10s RPC +25s poll +30s socket work +15s settlement
 # +45s async cleanup +10s model-thread cleanup +5s margin. Inner limits stay fixed.
 PEER_ENVELOPE = 300
+
+
+def _group_is_empty(pid):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
 
 
 def _phases(output):
@@ -27,19 +38,30 @@ def test_real_shared_clarify_survives_detach(tmp_path):
     output, errors = tmp_path / 'clarify-peer-stdout.log', tmp_path / 'clarify-peer-stderr.log'
     # File-backed diagnostics cannot strand communicate reader threads when a
     # worker inherits stdio. Completion is the captured peer's native wait.
+    timed_out = False
     with output.open('wb') as stdout, errors.open('wb') as stderr:
         peer = subprocess.Popen(
             [sys.executable, '-u', str(Path(__file__).parent / 'fixtures' / 'authority_clarify_peer.py')],
-            cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+            cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+            start_new_session=os.name == 'posix')
         try:
             code = peer.wait(timeout=PEER_ENVELOPE)
         except subprocess.TimeoutExpired:
-            # Only the captured owned peer; a forced terminal result is never acceptance.
-            peer.kill()
+            # POSIX owns a separate group. Windows has only captured-peer cleanup
+            # here; this test does not claim Windows descendant containment.
+            if os.name == 'posix':
+                os.killpg(peer.pid, signal.SIGKILL)
+            else:
+                peer.kill()
             code = peer.wait(timeout=15)
-            raise AssertionError({'peer_timeout': True, 'positive_wait': True, 'returncode': code,
-                                  'phases': _phases(errors.read_text(errors='replace'))}) from None
+            timed_out = True
     receipts = _phases(errors.read_text(errors='replace'))
+    for receipt in receipts:
+        print(json.dumps({'clarify_peer_receipt': receipt}), flush=True)
+    if os.name == 'posix':
+        wait_until(lambda: _group_is_empty(peer.pid), timeout=10,
+                   what='captured clarify peer process group empty')
+    assert not timed_out, {'peer_timeout': True, 'positive_wait': True, 'returncode': code}
     assert code == 0, {'returncode': code, 'phases': receipts}
     assert receipts and receipts[-1]['phase'] == 'peer_exit_ready', receipts
     assert {'async_transport_cleanup_complete', 'model_threads_terminal'} <= {r['phase'] for r in receipts}, receipts

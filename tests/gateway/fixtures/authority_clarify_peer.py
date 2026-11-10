@@ -7,12 +7,16 @@ from pathlib import Path
 import threading
 import time
 import sys
+import traceback
 
 
 STARTED_AT = time.monotonic()
+LAST_PHASE = None
 
 
 def phase(name, **fields):
+    global LAST_PHASE
+    LAST_PHASE = name
     print('hermes_clarify_phase ' + json.dumps({'phase': name, 'pid': os.getpid(),
           'elapsed': round(time.monotonic() - STARTED_AT, 3), **fields}), file=sys.stderr, flush=True)
 
@@ -210,6 +214,17 @@ if __name__ == '__main__':
         main()
         phase('peer_exit_ready')
     except BaseException as exc:
-        phase('peer_failed', error_type=type(exc).__name__)
+        # Code locations and fixed phases diagnose failures without exception
+        # messages, model payloads, config, headers or credential values.
+        failures = []
+        current = exc
+        while current is not None and len(failures) < 4:
+            failures.append({'error_type': type(current).__name__, 'frames': [
+                {'file': Path(frame.f_code.co_filename).name, 'line': line,
+                 'function': frame.f_code.co_name}
+                for frame, line in traceback.walk_tb(current.__traceback__)]})
+            current = current.__context__
+        phase('peer_failed', error_type=type(exc).__name__, failed_at=LAST_PHASE,
+              failure_locations=failures)
         status = 1
     os._exit(status)

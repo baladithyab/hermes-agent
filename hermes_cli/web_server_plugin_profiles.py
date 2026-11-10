@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterator, Optional
 from urllib.parse import parse_qsl, urlencode
 
 from fastapi import HTTPException
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse, Response
 from starlette import status
 from starlette._utils import get_route_path
@@ -254,9 +255,10 @@ async def forward_secondary_plugin_request(request, name: str) -> Optional[Respo
         target = (host, str(plugin["_dir"]), str(plugin["_api_file"]))
         return await forward_hosted_plugin(request, plugin, target, path.lstrip('/'),
                                           _hosted_plugin_for_request, query=query, headers=headers)
-    except HTTPException:
-        # Selection/authentication refusals retain their status and remain inert.
-        raise
+    except HTTPException as exc:
+        # Secondary forwarding runs in HTTP middleware, outside the router's
+        # exception handler. Render the same refusal the routed path would send.
+        return await http_exception_handler(request, exc)
     except Exception as exc:  # health: allow BLE001 -- the host runs third-party code; any failure is this request's 502
         _log.warning("Plugin %s: its profile's plugin host could not serve %s: %s", name, path, exc)
         return JSONResponse({"detail": f"plugin {name!r} could not run in this profile's plugin host"},

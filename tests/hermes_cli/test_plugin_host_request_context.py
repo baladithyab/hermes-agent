@@ -193,8 +193,10 @@ def test_authenticated_http_enters_real_host_with_no_credentials(tmp_path, monke
             env.update(TEST_PLUGIN_URL=str(client.base_url).rstrip('/') + '/api/plugins/context-probe',
                        TEST_PLUGIN_AUTH_HEADER=web_server._SESSION_HEADER_NAME,
                        TEST_PLUGIN_AUTH=web_server._SESSION_TOKEN)
-            probe = subprocess.run(['node', str(Path(__file__).with_name('plugin_selection_network.mts'))],
-                                   env=env, capture_output=True, text=True, timeout=20, check=False)
+            probe = subprocess.run(
+                ['node', '--import', 'tsx', str(Path(__file__).with_name('plugin_selection_network.mts'))],
+                cwd=Path(__file__).resolve().parents[2], env=env,
+                capture_output=True, text=True, timeout=20, check=False)
             assert probe.returncode == 0, probe.stdout + probe.stderr
         client.headers['X-Hermes-Plugin-Client'] = 'generated-window-' + str(network)
         assert client.get(url).status_code == 409

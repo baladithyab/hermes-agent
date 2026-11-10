@@ -11,6 +11,29 @@ from tests.waiting import wait_until
 NATIVE_BOOT_BUDGET = 180
 
 
+def wait_native_http_ready(process, home, control, descriptor):
+    """Earn the deferred dashboard mount before measuring native grant requests."""
+    import httpx
+    from gateway.status import get_process_start_time
+
+    started = time.monotonic()
+    # Separate cold-import setup, with no ticket minted or consumed. Measured
+    # authorization requests retain their existing transport limits.
+    with httpx.Client(base_url=descriptor['api_origin'], trust_env=False,
+                      timeout=httpx.Timeout(90, connect=5)) as client:
+        response = client.get('/api/health')
+        assert response.status_code == 200 and response.json().get('ok') is True
+    assert process.poll() is None, 'owned gateway exited during HTTP setup'
+    current = control(home, 'identify')
+    for key in ('pid', 'start_time', 'instance_id', 'hermes_home', 'api_origin',
+                'protocol', 'runtime_protocol', 'kind'):
+        assert current.get(key) == descriptor.get(key), 'native owner changed during HTTP setup'
+    assert current['state'] == 'ready' and current['pid'] == process.pid
+    assert current['start_time'] == get_process_start_time(process.pid)
+    print(json.dumps({'native_fixture_phase': 'dashboard_http_ready', 'pid': process.pid,
+                      'elapsed': round(time.monotonic() - started, 3)}), flush=True)
+
+
 def wait_native_ready(process, home, control, *, spawned_at):
     instance = None
     last_state = None
