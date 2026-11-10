@@ -32,7 +32,7 @@ def test_real_shared_clarify_survives_detach(tmp_path):
     home.mkdir()
     state.mkdir()
     repo = Path(__file__).resolve().parents[2]
-    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'TZ') if key in os.environ}
+    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'TZ', 'TMPDIR', 'TMP', 'TEMP') if key in os.environ}
     env.update(HOME=str(home), USERPROFILE=str(home), HERMES_HOME=str(state), PYTHONPATH=str(repo),
                PYTHONUNBUFFERED='1')
     output, errors = tmp_path / 'clarify-peer-stdout.log', tmp_path / 'clarify-peer-stderr.log'
@@ -47,21 +47,24 @@ def test_real_shared_clarify_survives_detach(tmp_path):
         try:
             code = peer.wait(timeout=PEER_ENVELOPE)
         except subprocess.TimeoutExpired:
+            timed_out = True
             # POSIX owns a separate group. Windows has only captured-peer cleanup
             # here; this test does not claim Windows descendant containment.
             if os.name == 'posix':
                 os.killpg(peer.pid, signal.SIGKILL)
             else:
                 peer.kill()
-            code = peer.wait(timeout=15)
-            timed_out = True
+            try:
+                code = peer.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                code = None
     receipts = _phases(errors.read_text(errors='replace'))
     for receipt in receipts:
         print(json.dumps({'clarify_peer_receipt': receipt}), flush=True)
     if os.name == 'posix':
         wait_until(lambda: _group_is_empty(peer.pid), timeout=10,
-                   what='captured clarify peer process group empty')
-    assert not timed_out, {'peer_timeout': True, 'positive_wait': True, 'returncode': code}
+                   what=f'captured clarify peer process group empty; timed_out={timed_out}')
+    assert not timed_out, {'peer_timeout': True, 'positive_wait': code is not None, 'returncode': code}
     assert code == 0, {'returncode': code, 'phases': receipts}
     assert receipts and receipts[-1]['phase'] == 'peer_exit_ready', receipts
     assert {'async_transport_cleanup_complete', 'model_threads_terminal'} <= {r['phase'] for r in receipts}, receipts

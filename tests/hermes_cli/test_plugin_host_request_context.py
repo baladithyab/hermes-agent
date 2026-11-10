@@ -189,7 +189,8 @@ def test_authenticated_http_enters_real_host_with_no_credentials(tmp_path, monke
         if network:
             import subprocess
             from pathlib import Path
-            env = {key: os.environ[key] for key in ('PATH', 'HOME', 'HERMES_HOME') if key in os.environ}
+            env = {key: os.environ[key] for key in ('PATH', 'HOME', 'HERMES_HOME', 'TMPDIR', 'TMP', 'TEMP')
+                   if key in os.environ}
             env.update(TEST_PLUGIN_URL=str(client.base_url).rstrip('/') + '/api/plugins/context-probe',
                        TEST_PLUGIN_AUTH_HEADER=web_server._SESSION_HEADER_NAME,
                        TEST_PLUGIN_AUTH=web_server._SESSION_TOKEN)

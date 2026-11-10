@@ -1,5 +1,6 @@
 """Owned loopback model, real clarify tool, native card, two authenticated sockets."""
 import asyncio
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -222,7 +223,7 @@ if __name__ == '__main__':
             failures.append({'error_type': type(current).__name__, 'frames': [
                 {'file': Path(frame.f_code.co_filename).name, 'line': line,
                  'function': frame.f_code.co_name}
-                for frame, line in traceback.walk_tb(current.__traceback__)]})
+                for frame, line in deque(traceback.walk_tb(current.__traceback__), maxlen=20)]})
             current = current.__context__
         phase('peer_failed', error_type=type(exc).__name__, failed_at=LAST_PHASE,
               failure_locations=failures)
