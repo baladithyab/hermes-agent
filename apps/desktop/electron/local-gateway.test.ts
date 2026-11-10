@@ -569,7 +569,7 @@ test('main issues native-gateway REST calls only through the shared descriptor t
   const outside = source.slice(0, transport) + source.slice(transportEnd)
 
   expect(transport).toBeGreaterThan(0)
-  expect(source.slice(transport, transportEnd)).toContain('headers: descriptor.headers')
+  expect(source.slice(transport, transportEnd)).toContain('headers: { ...descriptor.headers, ...opts.headers }')
   expect(outside.match(/fetchJson\([^)]*\{[^}]*gatewayDescriptor\b/g) ?? []).toEqual([])
 })
 
